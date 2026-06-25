@@ -681,7 +681,12 @@ async def main():
             print("✅ Bot Running!", flush=True)
             print("=" * 55, flush=True)
             for ch, cfg in CHANNEL_MAPPING.items():
-                print(f"📡 {ch}: {cfg['monitor']} → {cfg['forward']}", flush=True)
+                print(f"📡 {ch}: Monitor {cfg['monitor']}", flush=True)
+                print(f"   ├─ Filter 1 → {cfg['forward_filter1']}", flush=True)
+                print(f"   ├─ Filter 2 → {cfg['forward_filter2']}", flush=True)
+                print(f"   ├─ Filter 3A → {cfg['forward_filter3a']}", flush=True)
+                print(f"   ├─ Filter 3B → {cfg['forward_filter3b']}", flush=True)
+                print(f"   └─ Filter 3C → {cfg['forward_filter3c']}", flush=True)
             print("=" * 55, flush=True)
             
             await client.run_until_disconnected()
