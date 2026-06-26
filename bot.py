@@ -653,7 +653,24 @@ async def create_handler(channel_name):
                 tracking_file = TRACKING_FILES[channel_name]
                 asyncio.create_task(track_ath(ca, metrics, f"{channel_name}_{filter_name}", tracking_file, forward_chat, event.client))
             else:
-                print(f"❌ {filter_name} {metrics.get('name', 'Unknown')[:20]} FILTERED OUT", flush=True)
+                # Show WHY it was rejected
+                scans = metrics.get('scans', 0)
+                age = metrics.get('age_min', 0)
+                holders = metrics.get('holders', 0)
+                dev_sold = metrics.get('dev_sold', 0)
+                
+                rejection_reasons = []
+                if scans < filter_rules['scans_min']:
+                    rejection_reasons.append(f"Scans:{scans}<{filter_rules['scans_min']}")
+                if age < filter_rules['age_min']:
+                    rejection_reasons.append(f"Age:{age}<{filter_rules['age_min']}")
+                if filter_rules['holders_max'] is not None and holders > filter_rules['holders_max']:
+                    rejection_reasons.append(f"Holders:{holders}>{filter_rules['holders_max']}")
+                if dev_sold > filter_rules['dev_sold_max']:
+                    rejection_reasons.append(f"DevSold:{dev_sold}>{filter_rules['dev_sold_max']}")
+                
+                reason_str = " | ".join(rejection_reasons) if rejection_reasons else "Unknown"
+                print(f"❌ {filter_name} {metrics.get('name', 'Unknown')[:20]} REJECTED - MC:${metrics.get('mc', 0):,.0f} [{reason_str}]", flush=True)
     
     return handler
 
