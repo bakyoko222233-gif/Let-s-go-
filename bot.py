@@ -218,7 +218,18 @@ def parse_moodeng(text):
     metrics['symbol'] = extract_metric(text, r'\$([A-Z0-9]+)') or ''
     metrics['ca'] = extract_metric(text, r'CA:\s*([1-9A-HJ-NP-Za-km-z]{32,44}pump)') or ''
     
-    metrics['age'] = extract_metric(text, r'⌛️\s*Pool Age:\s*(\d+[smh])') or '0m'
+    # Parse age and convert to minutes
+    age_str = extract_metric(text, r'⌛️\s*Pool Age:\s*(\d+[smh])') or '0m'
+    age_num = int(re.search(r'(\d+)', age_str).group(1)) if re.search(r'(\d+)', age_str) else 0
+    age_unit = re.search(r'[smh]', age_str).group(0) if re.search(r'[smh]', age_str) else 'm'
+    if age_unit == 's':
+        metrics['age_min'] = age_num / 60
+    elif age_unit == 'h':
+        metrics['age_min'] = age_num * 60
+    else:  # minutes
+        metrics['age_min'] = age_num
+    
+    metrics['age'] = age_str  # Keep original string too
     metrics['mc'] = parse_value(extract_metric(text, r'Market Cap:\s*\$?([\d,\.]+[KMB]?)'))
     metrics['liquidity'] = parse_value(extract_metric(text, r'Liquid:\s*\$?([\d,\.]+[KMB]?)'))
     metrics['fake_liq'] = parse_value(extract_metric(text, r'Fake:\s*\$?([\d,\.]+[KMB]?)')) if 'Fake:' in text else 0
