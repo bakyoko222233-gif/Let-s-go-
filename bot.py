@@ -434,7 +434,38 @@ async def get_price_and_mc(ca: str):
 SOLANA_CA_PATTERN = r'[1-9A-HJ-NP-Za-km-z]{32,44}pump'
 
 # ==================== REPORT FORMATTING ====================
+def format_full_report(metrics, filter_name, ca):
+    """Format immediate message with all metrics when token passes filter"""
+    msg = f"""
+🚀 {filter_name} ALERT
+
+📊 TOKEN: {metrics.get('name', 'Unknown')}
+🎯 CA: `{ca}`
+
+💰 Market Cap: ${metrics.get('mc', 0):,.0f}
+💧 Liquidity: ${metrics.get('liquidity', 0):,.0f}
+📈 Volume 1h: ${metrics.get('vol1h', 0):,.0f}
+
+📋 METRICS:
+├─ Pool Age: {metrics.get('age', 'Unknown')}
+├─ Scans: {metrics.get('scans', 0)}
+├─ Holders: {metrics.get('holders', 0)}
+├─ Top 10: {metrics.get('top10_pct', 0):.2f}%
+├─ Fake Liq: {metrics.get('fake_liq_pct', 0):.1f}%
+├─ Fake Holders: {metrics.get('fake_holders_pct', 0):.1f}%
+├─ First 20: {metrics.get('first20_pct', 0):.1f}%
+├─ Dev Sold: {metrics.get('dev_sold', 0):.1f}%
+├─ Bundles: {metrics.get('bundles', 0)} ({metrics.get('bundles_before', 0):.1f}% → {metrics.get('bundles_after', 0):.1f}%)
+└─ Snipers: {metrics.get('snipers', 0)} ({metrics.get('snipers_before', 0):.1f}% → {metrics.get('snipers_after', 0):.1f}%)
+
+Vol 5m: ${metrics.get('vol5m', 0):,.0f} | Vol 24h: ${metrics.get('vol24h', 0):,.0f}
+Price Change: +{metrics.get('price_change_pct', 0)}%
+"""
+    return msg.strip()
+
+
 def format_report(metrics, entry_mc, ath_mc, ath_mult, verdict, elapsed_min):
+    """Format final WIN/LOSS report when token dies"""
     """Format comprehensive token report with ALL metrics for Telegram"""
     
     name = metrics.get('name', 'Unknown')
@@ -660,9 +691,14 @@ async def create_handler(channel_name):
         
         for filter_name, filter_rules, forward_chat in filters:
             if passes_filter(metrics, filter_rules):
-                print(f"✅ {filter_name} {metrics.get('name', 'Unknown')[:20]} PASSED - MC:${metrics.get('mc', 0):,.0f} → {forward_chat}", flush=True)
-                tracking_file = TRACKING_FILES[channel_name]
-                asyncio.create_task(track_ath(ca, metrics, f"{channel_name}_{filter_name}", tracking_file, forward_chat, event.client))
+                # Build full metrics message
+                msg = format_full_report(metrics, filter_name, ca)
+                
+                try:
+                    await event.client.send_message(forward_chat, msg)
+                    print(f"✅ {filter_name} {metrics.get('name', 'Unknown')[:20]} SENT → {forward_chat}", flush=True)
+                except Exception as e:
+                    print(f"⚠️  Send error ({filter_name}): {e}", flush=True)
             else:
                 # Show WHY it was rejected
                 scans = metrics.get('scans', 0)
