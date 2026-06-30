@@ -4,6 +4,7 @@ import re
 import asyncio
 import aiohttp
 import json
+import csv
 from datetime import datetime, timezone
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
@@ -15,116 +16,59 @@ api_id   = 33243817
 api_hash = '84b76a174eabcccd6bba85ec9eb4daf3'
 SESSION_STRING = os.getenv('SESSION_STRING', '')
 
-# MOODENG ONLY - 5 FILTERS TO 5 FORWARD CHANNELS
+# PUMPFUN ULTIMATE CHANNEL - AUTO DATA COLLECTION
 CHANNEL_MAPPING = {
-    'moodeng': {
-        'monitor': -1002270552242,
-        'forward_filter1': -5134396719,
-        'forward_filter2': -5231579644,
-        'forward_filter3a': -5106136423,
-        'forward_filter3b': -5035266819,
-        'forward_filter3c': -1003936002395,
+    'pumpfun_ultimate': {
+        'monitor': -1002380293749,  # ✅ PumpFun Ultimate Channel
+        'data_file': 'pumpfun_data.csv',
+        'forward_channel': -5134396719,  # ✅ Your Alert Group
     }
 }
 
-SEEN_FILES = {ch: f"seen_{ch}.json" for ch in CHANNEL_MAPPING.keys()}
 TRACKING_FILES = {ch: f"tracking_{ch}.json" for ch in CHANNEL_MAPPING.keys()}
 processing_locks = {ch: Lock() for ch in CHANNEL_MAPPING.keys()}
 
 ATH_CHECK_INTERVAL = 5 * 60
 DEAD_MC_THRESHOLD = 5000
 
-# ==================== FILTER OPTIONS ====================
-# Based on analysis of 850+ Moodeng tokens
-# WINNERS vs LOSERS comparison:
-# - Scans: winners avg 20, losers avg 1.7 (1300% difference)
-# - Age: winners avg 23.5 min, losers avg 5 min (90% difference)
-# - Holders: winners avg 129, losers avg 219 (52% difference)
-# - Dev Sold: winners avg 13.7%, losers avg 18% (7% difference)
+# ==================== PUMPFUN ULTIMATE REGEX PATTERNS ====================
+# Format from screenshot:
+# Zenko (ZOLANA)
+# Ez6gPDiNK7VtGe5o9vnhDHJq9QPhvEYmSo8teu8mpump
+# by MonstaScan
+# Cap: 27.1K | 🕐 9m | Search on X
+# Vol: 44.1K | 📊 702 | 💲 761
+# Bonding Curve: 97.57%
+# Dev: ✅ (sold)
+# Buyers
+# ├🔍Insiders: 2
+# └⭐KOLs: 3
+# TH: 150 (total) | Top 10: 26.5%
+# Early:
+# ├Sniper: 7 buy 25.5% with 12.1 SOL
+# ├Bundle: 0
+# ├Sum 🅑:44.3% | Sum 🅢: 30%
 
-# FILTER 1: Balanced (35% coverage, 100% win rate)
-FILTER_1 = {
-    'scans_min': 5,
-    'age_min': 3,
-    'holders_max': 180,
-    'dev_sold_max': 25,
+PUMPFUN_PATTERNS = {
+    'token_name': r'^([^\n]+?)\s*(?:\([A-Z0-9]+\))?\s*\n([1-9A-HJ-NP-Za-km-z]{32,44}pump)',
+    'ca': r'([1-9A-HJ-NP-Za-km-z]{32,44}pump)',
+    'scanner': r'by\s+([^\n]+)',
+    'mc': r'Cap:\s*([0-9.]+)([KMB]?)',
+    'age': r'🕐\s*([0-9]+)m',
+    'volume': r'Vol:\s*([0-9.]+)([KMB]?)',
+    'buy_tx': r'📊\s*(\d+)',
+    'sell_tx': r'💲\s*(\d+)',
+    'bonding_curve': r'Bonding Curve:\s*([0-9.]+)%',
+    'dev_status': r'Dev:\s*(✅|❌)\s*\(([^)]+)\)',
+    'insiders': r'🔍?Insiders:\s*(\d+)',
+    'kols': r'⭐?KOLs:\s*(\d+)',
+    'total_holders': r'TH:\s*(\d+)',
+    'top10_pct': r'Top 10:\s*([0-9.]+)%',
+    'snipers': r'Sniper:\s*(\d+)\s+buy\s+([0-9.]+)%',
+    'bundles': r'Bundle:\s*(\d+)',
+    'buy_pct': r'Sum\s+🅑:([0-9.]+)%',
+    'sell_pct': r'Sum\s+🅢:\s*([0-9.]+)%',
 }
-
-# FILTER 2: Aggressive (43.5% coverage, 100% win rate)
-FILTER_2 = {
-    'scans_min': 5,
-    'age_min': 3,
-    'holders_max': None,
-    'dev_sold_max': 25,
-}
-
-# FILTER 3A: Super Aggressive + Holders<250 (78.3% coverage, 100% win rate)
-FILTER_3A = {
-    'scans_min': 3,
-    'age_min': 1,
-    'holders_max': 250,
-    'dev_sold_max': 30,
-}
-
-# FILTER 3B: Liberal Scans (78.3% coverage, 100% win rate)
-FILTER_3B = {
-    'scans_min': 4,
-    'age_min': 1,
-    'holders_max': None,
-    'dev_sold_max': 35,
-}
-
-# FILTER 3C: Super Chill - Max Coverage (82.6% coverage, 94.7% win rate)
-FILTER_3C = {
-    'scans_min': 3,
-    'age_min': 1,
-    'holders_max': None,
-    'dev_sold_max': 30,
-}
-
-def passes_filter(metrics, filter_rules):
-    """Check if token passes filter criteria"""
-    try:
-        # SCANS CHECK (REQUIRED)
-        scans = metrics.get('scans', 0)
-        if scans is None:
-            scans = 0
-        if isinstance(scans, str):
-            scans = float(scans) if scans else 0
-        if scans < filter_rules['scans_min']:
-            return False
-        
-        # AGE CHECK (REQUIRED)
-        age = metrics.get('age_min', 0)
-        if age is None:
-            age = 0
-        if isinstance(age, str):
-            age = float(age) if age else 0
-        if age < filter_rules['age_min']:
-            return False
-        
-        # HOLDERS CHECK (OPTIONAL)
-        if filter_rules['holders_max'] is not None:
-            holders = metrics.get('holders', 999)
-            if holders is None:
-                holders = 999
-            if isinstance(holders, str):
-                holders = float(holders) if holders else 999
-            if holders > filter_rules['holders_max']:
-                return False
-        
-        # DEV SOLD CHECK (REQUIRED)
-        dev_sold = metrics.get('dev_sold', 30)
-        if dev_sold is None:
-            dev_sold = 30
-        if isinstance(dev_sold, str):
-            dev_sold = float(dev_sold) if dev_sold else 30
-        if dev_sold > filter_rules['dev_sold_max']:
-            return False
-        
-        return True
-    except:
-        return False
 
 # ==================== HELPERS ====================
 def load_seen(path):
@@ -161,16 +105,16 @@ def add_tracking(ca, metrics, path):
         now = datetime.now(timezone.utc)
         state[ca] = {
             'ca': ca,
-            'metrics': metrics,
+            'token_name': metrics.get('token_name', 'Unknown'),
             'entry_mc': metrics.get('mc', 0),
             'current_mc': metrics.get('mc', 0),
             'ath_mc': metrics.get('mc', 0),
             'ath_mult': 1.0,
-            'elapsed_seconds': 0,
+            'metrics': metrics,
             'detected_time': now.isoformat(),
             'last_update': now.isoformat(),
             'status': 'TRACKING',
-            'verdict': 'TRACKING'
+            'verdict': 'TRACKING',
         }
         save_tracking(state, path)
 
@@ -210,202 +154,111 @@ def extract_metric(text, pattern):
     m = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
     return m.group(1).strip() if m else None
 
-# ==================== MOODENG PARSER ====================
-def parse_moodeng(text):
+# ==================== PUMPFUN ULTIMATE PARSER ====================
+def parse_pumpfun_ultimate(text):
+    """Parse PumpFun Ultimate alert format"""
     metrics = {}
     
-    metrics['name'] = extract_metric(text, r'⚡️\s*‎?(.+?)\s*｜\s*\$') or 'Unknown'
-    metrics['symbol'] = extract_metric(text, r'\$([A-Z0-9]+)') or ''
-    metrics['ca'] = extract_metric(text, r'CA:\s*([1-9A-HJ-NP-Za-km-z]{32,44}pump)') or ''
-    
-    # Parse age and convert to minutes
-    age_str = extract_metric(text, r'⌛️\s*Pool Age:\s*(\d+[smh])') or '0m'
-    age_num = int(re.search(r'(\d+)', age_str).group(1)) if re.search(r'(\d+)', age_str) else 0
-    age_unit = re.search(r'[smh]', age_str).group(0) if re.search(r'[smh]', age_str) else 'm'
-    if age_unit == 's':
-        metrics['age_min'] = age_num / 60
-    elif age_unit == 'h':
-        metrics['age_min'] = age_num * 60
-    else:  # minutes
-        metrics['age_min'] = age_num
-    
-    metrics['age'] = age_str  # Keep original string too
-    metrics['mc'] = parse_value(extract_metric(text, r'Market Cap:\s*\$?([\d,\.]+[KMB]?)'))
-    metrics['liquidity'] = parse_value(extract_metric(text, r'Liquid:\s*\$?([\d,\.]+[KMB]?)'))
-    metrics['fake_liq'] = parse_value(extract_metric(text, r'Fake:\s*\$?([\d,\.]+[KMB]?)')) if 'Fake:' in text else 0
-    
-    metrics['dex_paid'] = '✅' if 'Paid✅' in text else '❌'
-    metrics['dex_ads'] = '✅' if 'Ads✅' in text else '❌'
-    metrics['scans'] = int(extract_metric(text, r'Scans:\s*(\d+)') or 0)
-    
-    metrics['holders'] = int(extract_metric(text, r'Holders:\s*(\d+)') or 0)
-    metrics['top10_pct'] = float(extract_metric(text, r'TOP 10:\s*([\d\.]+)%') or 0)
-    metrics['fake_holders'] = int(extract_metric(text, r'Fake:\s*(\d+)') or 0) if 'Fake:' in text.split('Holders')[1:] else 0
-    
-    metrics['bundles'] = int(extract_metric(text, r'Bundles:\s*(\d+)') or 0)
-    metrics['bundles_before'] = float(extract_metric(text, r'Bundles:\s*\d+\s*｜?\s*([\d\.]+)%') or 0)
-    metrics['bundles_after'] = float(extract_metric(text, r'→\s*([\d\.]+)%') or 0)
-    
-    metrics['snipers'] = int(extract_metric(text, r'Snipers:\s*(\d+)') or 0)
-    metrics['snipers_before'] = float(extract_metric(text, r'Snipers:\s*\d+\s*｜?\s*([\d\.]+)%') or 0)
-    metrics['snipers_after'] = float(extract_metric(text, r'Snipers:.*?→\s*([\d\.]+)%') or 0)
-    
-    metrics['first20'] = float(extract_metric(text, r'First 20:\s*([\d\.]+)%') or 0)
-    
-    metrics['dev_sol'] = float(extract_metric(text, r'Dev:\s*([\d\.]+)\s*SOL') or 0)
-    metrics['dev_pct'] = float(extract_metric(text, r'Dev:.*?\|([\d\.]+)%') or 0)
-    metrics['dev_bundled'] = float(extract_metric(text, r'Bundled:\s*([\d\.]+)%') or 0)
-    metrics['dev_sold'] = float(extract_metric(text, r'Sold:\s*([\d\.]+)%') or 0)
-    metrics['dev_airdrop'] = float(extract_metric(text, r'Airdrop:\s*([\d\.]+)%') or 0)
-    
-    metrics['vol_5m'] = parse_value(extract_metric(text, r'Last 5m:\s*\$([\d,\.]+[KMB]?)'))
-    metrics['vol_5m_buy'] = parse_value(extract_metric(text, r'Last 5m:.*?B:\s*\$([\d,\.]+[KMB]?)'))
-    metrics['vol_5m_sell'] = parse_value(extract_metric(text, r'Last 5m:.*?S:\s*\$([\d,\.]+[KMB]?)'))
-    metrics['vol_5m_tx'] = int(extract_metric(text, r'Last 5m:.*?(\d+)\s*tx') or 0)
-    
-    metrics['vol_1h'] = parse_value(extract_metric(text, r'Last 1h:\s*\$([\d,\.]+[KMB]?)'))
-    metrics['vol_1h_buy'] = parse_value(extract_metric(text, r'Last 1h:.*?B:\s*\$([\d,\.]+[KMB]?)'))
-    metrics['vol_1h_sell'] = parse_value(extract_metric(text, r'Last 1h:.*?S:\s*\$([\d,\.]+[KMB]?)'))
-    metrics['vol_1h_tx'] = int(extract_metric(text, r'Last 1h:.*?(\d+)\s*tx') or 0)
-    
-    metrics['vol_24h'] = parse_value(extract_metric(text, r'TOTAL Volume 24h:\s*\$([\d,\.]+[KMB]?)'))
-    
-    return metrics
-
-# ==================== KOL SIGNAL PARSER ====================
-def parse_kol_signal(text):
-    metrics = {}
-    
-    metrics['name'] = extract_metric(text, r'⚡️\s*(.+?)\s*｜\s*\$') or 'Unknown'
-    metrics['symbol'] = extract_metric(text, r'\$([A-Z0-9]+)') or ''
-    metrics['ca'] = extract_metric(text, r'CA:\s*([1-9A-HJ-NP-Za-km-z]{32,44}pump)') or ''
-    
-    metrics['mc'] = parse_value(extract_metric(text, r'MC:\s*\$?\s*([\d,\.]+[KMB]?)'))
-    metrics['dev_sold'] = '✅' if 'Dev SOLD:  ✅' in text else '❌'
-    metrics['holders'] = int(extract_metric(text, r'Holders:\s*(\d+)') or 0)
-    metrics['top10_pct'] = float(extract_metric(text, r'TOP 10:\s*([\d\.]+)%') or 0)
-    
-    kol_buys = extract_metric(text, r'(\d+)\s*KOL BUY')
-    metrics['kol_buys_count'] = int(kol_buys) if kol_buys else 0
-    
-    kol_pattern = r'🌙\s*(\w+)\s*⇨\s*📈\s*BUY\s*([\d\.]+)\s*SOL\s*-\s*(.+?)(?=🌙|🎮)'
-    kol_list = re.findall(kol_pattern, text, re.DOTALL)
-    metrics['kol_details'] = kol_list
-    metrics['kol_total_sol'] = sum([float(kol[1]) for kol in kol_list])
-    
-    metrics['volume'] = parse_value(extract_metric(text, r'Total Volume:\s*\$?([\d,\.]+[KMB]?)'))
-    metrics['txns'] = int(extract_metric(text, r'Txns:\s*(\d+)') or 0)
-    metrics['age'] = extract_metric(text, r'Age:\s*(.+?)(?:\n|$)') or '0m'
-    
-    socials = extract_metric(text, r'Socials:\s*(.+?)(?:\n|$)')
-    metrics['socials'] = socials or ''
-    
-    return metrics
-
-# ==================== TESTALPHABOT PARSER ====================
-def parse_testalphabot(text):
-    metrics = {}
-    
-    # Extract full name and symbol
-    name_match = extract_metric(text, r'Name:\s*(.+?)\s*｜')
-    if name_match:
-        metrics['name'] = name_match
+    # Token name and CA
+    token_match = re.search(PUMPFUN_PATTERNS['token_name'], text, re.MULTILINE)
+    if token_match:
+        metrics['token_name'] = token_match.group(1).strip()
+        metrics['ca'] = token_match.group(2)
     else:
-        metrics['name'] = 'Unknown'
+        ca_match = re.search(PUMPFUN_PATTERNS['ca'], text)
+        if ca_match:
+            metrics['ca'] = ca_match.group(1)
+            metrics['token_name'] = 'Unknown'
+        else:
+            return {}
     
-    metrics['symbol'] = extract_metric(text, r'\$([A-Z0-9]+)') or ''
-    metrics['ca'] = extract_metric(text, r'CA:\s*([1-9A-HJ-NP-Za-km-z]{32,44}[a-zA-Z0-9]*)') or ''
+    # Scanner
+    scanner_match = re.search(PUMPFUN_PATTERNS['scanner'], text)
+    if scanner_match:
+        metrics['scanner'] = scanner_match.group(1)
     
-    metrics['age'] = extract_metric(text, r'Age:\s*(.+?)(?:\n|├)') or '0m'
-    metrics['mc'] = parse_value(extract_metric(text, r'Market Cap:\s*\$?([\d,\.]+[KMB]?)'))
-    metrics['liquidity'] = parse_value(extract_metric(text, r'Liq:\s*\$?([\d,\.]+[KMB]?)'))
+    # Market cap
+    mc_match = re.search(PUMPFUN_PATTERNS['mc'], text)
+    if mc_match:
+        mc_val = float(mc_match.group(1))
+        unit = mc_match.group(2) or 'K'
+        
+        multipliers = {'K': 1000, 'M': 1_000_000, 'B': 1_000_000_000}
+        metrics['mc'] = mc_val * multipliers.get(unit, 1)
+    else:
+        metrics['mc'] = 0
     
-    # Whales Score
-    whales = extract_metric(text, r'Whales Score:\s*(\d+)')
-    metrics['whales_score'] = int(whales) if whales else 0
+    # Age (in minutes)
+    age_match = re.search(PUMPFUN_PATTERNS['age'], text)
+    metrics['age_min'] = int(age_match.group(1)) if age_match else 0
     
-    metrics['holders'] = int(extract_metric(text, r'Holders:\s*(\d+)') or 0)
-    metrics['top10_pct'] = float(extract_metric(text, r'TOP 10:\s*([\d\.]+)%') or 0)
+    # Volume
+    vol_match = re.search(PUMPFUN_PATTERNS['volume'], text)
+    if vol_match:
+        vol_val = float(vol_match.group(1))
+        unit = vol_match.group(2) or 'K'
+        
+        multipliers = {'K': 1000, 'M': 1_000_000, 'B': 1_000_000_000}
+        metrics['vol_5m'] = vol_val * multipliers.get(unit, 1)
+    else:
+        metrics['vol_5m'] = 0
     
-    # Holder distribution - all percentages after TOP 10
-    distribution_pattern = r'TOP 10:.*?%\s*\n└\s*([\d\.]+(?:\s*｜\s*[\d\.]+)*)'
-    distribution = extract_metric(text, distribution_pattern)
-    if distribution:
-        metrics['holder_distribution'] = distribution
+    # Buy/Sell transactions
+    buy_match = re.search(PUMPFUN_PATTERNS['buy_tx'], text)
+    metrics['buy_tx'] = int(buy_match.group(1)) if buy_match else 0
     
-    dev_status = extract_metric(text, r'Devs:\s*(✅|❌)')
-    metrics['dev_sold'] = '✅' if dev_status == '✅' else '❌'
+    sell_match = re.search(PUMPFUN_PATTERNS['sell_tx'], text)
+    metrics['sell_tx'] = int(sell_match.group(1)) if sell_match else 0
     
-    # Trades - Buy and Sell counts
-    buys = extract_metric(text, r'🅑\s*(\d+)')
-    metrics['buys'] = int(buys) if buys else 0
+    # Bonding curve
+    bonding_match = re.search(PUMPFUN_PATTERNS['bonding_curve'], text)
+    metrics['bonding_curve_pct'] = float(bonding_match.group(1)) if bonding_match else 0
     
-    sells = extract_metric(text, r'🅢\s*(\d+)')
-    metrics['sells'] = int(sells) if sells else 0
+    # Dev status
+    dev_match = re.search(PUMPFUN_PATTERNS['dev_status'], text)
+    if dev_match:
+        dev_icon = dev_match.group(1)
+        dev_action = dev_match.group(2)
+        metrics['dev_sold'] = (dev_icon == '✅')
+        metrics['dev_action'] = dev_action
+    else:
+        metrics['dev_sold'] = False
     
-    metrics['volume'] = parse_value(extract_metric(text, r'Volume:\s*\$?([\d,\.]+[KMB]?)'))
+    # Insiders
+    insiders_match = re.search(PUMPFUN_PATTERNS['insiders'], text)
+    metrics['insiders'] = int(insiders_match.group(1)) if insiders_match else 0
     
-    socials_count = extract_metric(text, r'Socials \((\d+)\)')
-    metrics['socials_count'] = int(socials_count) if socials_count else 0
+    # KOLs
+    kols_match = re.search(PUMPFUN_PATTERNS['kols'], text)
+    metrics['kols'] = int(kols_match.group(1)) if kols_match else 0
     
-    socials = extract_metric(text, r'Socials \(\d+\)\s*:\s*(.+?)(?:\n|$)')
-    metrics['socials'] = socials or ''
+    # Total holders
+    holders_match = re.search(PUMPFUN_PATTERNS['total_holders'], text)
+    metrics['total_holders'] = int(holders_match.group(1)) if holders_match else 0
     
-    return metrics
-
-# ==================== DEX BOOSTER PARSER ====================
-def parse_dex_booster(text):
-    metrics = {}
+    # Top 10 %
+    top10_match = re.search(PUMPFUN_PATTERNS['top10_pct'], text)
+    metrics['top10_pct'] = float(top10_match.group(1)) if top10_match else 0
     
-    metrics['name'] = extract_metric(text, r'\[⚡️\s*SOL\]\s*-\s*(.+?)\s*｜') or 'Unknown'
-    metrics['symbol'] = extract_metric(text, r'\$([A-Z0-9]+)') or ''
-    metrics['ca'] = extract_metric(text, r'CA:\s*([1-9A-HJ-NP-Za-km-z]{32,44}[a-zA-Z0-9]*?)(?:\n|$)') or ''
+    # Snipers
+    sniper_match = re.search(PUMPFUN_PATTERNS['snipers'], text)
+    if sniper_match:
+        metrics['snipers'] = int(sniper_match.group(1))
+        metrics['sniper_pct'] = float(sniper_match.group(2))
+    else:
+        metrics['snipers'] = 0
+        metrics['sniper_pct'] = 0
     
-    metrics['mc'] = parse_value(extract_metric(text, r'Market Cap:\s*\$?([\d,\.]+[KMB]?)'))
-    metrics['liquidity'] = parse_value(extract_metric(text, r'Liq:\s*\$?([\d,\.]+[KMB]?)'))
+    # Bundles
+    bundle_match = re.search(PUMPFUN_PATTERNS['bundles'], text)
+    metrics['bundles'] = int(bundle_match.group(1)) if bundle_match else 0
     
-    boost = extract_metric(text, r'Total Boost:\s*⚡️(\d+)')
-    metrics['boost_count'] = int(boost) if boost else 0
+    # Buy/Sell percentages
+    buy_pct_match = re.search(PUMPFUN_PATTERNS['buy_pct'], text)
+    metrics['buy_pct'] = float(buy_pct_match.group(1)) if buy_pct_match else 0
     
-    metrics['dex_paid'] = '✅' if 'DEX Paid: ✅' in text else '❌'
-    
-    metrics['age'] = extract_metric(text, r'Age:\s*(.+?)(?:\n|├)') or '0m'
-    
-    metrics['volume'] = parse_value(extract_metric(text, r'Volume:\s*\$?([\d,\.]+[KMB]?)'))
-    metrics['bundle_pct'] = float(extract_metric(text, r'Bundle:\s*([\d\.]+)%') or 0)
-    metrics['total_fees'] = float(extract_metric(text, r'Total Fees:\s*([\d\.]+)') or 0)
-    
-    metrics['holders'] = int(extract_metric(text, r'Holders:\s*(\d+)') or 0)
-    metrics['top10_pct'] = float(extract_metric(text, r'TOP 10:\s*([\d\.]+)%') or 0)
-    
-    distribution_pattern = r'└\s*([\d\.]+(?:\s*｜\s*[\d\.]+)*)'
-    distribution = extract_metric(text, distribution_pattern)
-    if distribution:
-        metrics['holder_distribution'] = distribution
-    
-    dev_status = extract_metric(text, r'Dev:\s*(✅|❌)')
-    metrics['dev_sold'] = '✅' if dev_status == '✅' else '❌'
-    
-    dev_created = extract_metric(text, r'Dev Tokens Created:\s*(\d+)')
-    metrics['dev_created'] = int(dev_created) if dev_created else 0
-    
-    dev_bonded = extract_metric(text, r'Dev Bonded:\s*(\d+)')
-    metrics['dev_bonded'] = int(dev_bonded) if dev_bonded else 0
-    
-    insiders = extract_metric(text, r'Insiders:\s*([\d\.]+)%')
-    metrics['insiders_pct'] = float(insiders) if insiders else 0
-    
-    snipers = extract_metric(text, r'Snipers:\s*([\d\.]+)%')
-    metrics['snipers_pct'] = float(snipers) if snipers else 0
-    
-    bots = extract_metric(text, r'BOTs:\s*(\d+)')
-    metrics['bots'] = int(bots) if bots else 0
-    
-    kols = extract_metric(text, r'KOLs:\s*(\d+)')
-    metrics['kols'] = int(kols) if kols else 0
-    
-    socials = extract_metric(text, r'Socials \((\d+)\)\s*:\s*(.+?)(?:\n|$)')
-    metrics['socials'] = socials or ''
+    sell_pct_match = re.search(PUMPFUN_PATTERNS['sell_pct'], text)
+    metrics['sell_pct'] = float(sell_pct_match.group(1)) if sell_pct_match else 0
     
     return metrics
 
@@ -433,169 +286,146 @@ async def get_price_and_mc(ca: str):
 
 SOLANA_CA_PATTERN = r'[1-9A-HJ-NP-Za-km-z]{32,44}pump'
 
-# ==================== REPORT FORMATTING ====================
-def format_full_report(metrics, filter_name, ca):
-    """Format immediate message with all metrics when token passes filter"""
+# ==================== MESSAGE FORMATTING ====================
+def format_token_report(metrics, ca):
+    """Format all token details for Telegram"""
+    
+    token_name = metrics.get('token_name', 'Unknown')
+    
     msg = f"""
-🚀 {filter_name} ALERT
+🚀 NEW TOKEN DETECTED
 
-📊 TOKEN: {metrics.get('name', 'Unknown')}
-🎯 CA: `{ca}`
+📊 **Token Details:**
+Name: {token_name}
+CA: `{ca}`
 
-💰 Market Cap: ${metrics.get('mc', 0):,.0f}
-💧 Liquidity: ${metrics.get('liquidity', 0):,.0f}
-📈 Volume 1h: ${metrics.get('vol1h', 0):,.0f}
+💰 **Market Data:**
+MC: ${metrics.get('mc', 0):,.0f}
+Volume (5m): ${metrics.get('vol_5m', 0):,.0f}
+Age: {metrics.get('age_min', 0)}m
+Bonding Curve: {metrics.get('bonding_curve_pct', 0):.2f}%
 
-📋 METRICS:
-├─ Pool Age: {metrics.get('age', 'Unknown')}
-├─ Scans: {metrics.get('scans', 0)}
-├─ Holders: {metrics.get('holders', 0)}
-├─ Top 10: {metrics.get('top10_pct', 0):.2f}%
-├─ Fake Liq: {metrics.get('fake_liq_pct', 0):.1f}%
-├─ Fake Holders: {metrics.get('fake_holders_pct', 0):.1f}%
-├─ First 20: {metrics.get('first20_pct', 0):.1f}%
-├─ Dev Sold: {metrics.get('dev_sold', 0):.1f}%
-├─ Bundles: {metrics.get('bundles', 0)} ({metrics.get('bundles_before', 0):.1f}% → {metrics.get('bundles_after', 0):.1f}%)
-└─ Snipers: {metrics.get('snipers', 0)} ({metrics.get('snipers_before', 0):.1f}% → {metrics.get('snipers_after', 0):.1f}%)
+📈 **Activity:**
+Buy Txs: {metrics.get('buy_tx', 0)}
+Sell Txs: {metrics.get('sell_tx', 0)}
+Buy %: {metrics.get('buy_pct', 0):.1f}%
+Sell %: {metrics.get('sell_pct', 0):.1f}%
 
-Vol 5m: ${metrics.get('vol5m', 0):,.0f} | Vol 24h: ${metrics.get('vol24h', 0):,.0f}
-Price Change: +{metrics.get('price_change_pct', 0)}%
+👥 **Holders:**
+Total Holders: {metrics.get('total_holders', 0)}
+Top 10: {metrics.get('top10_pct', 0):.2f}%
+
+🎯 **Buyers:**
+Insiders: {metrics.get('insiders', 0)}
+KOLs: {metrics.get('kols', 0)}
+
+📦 **Early Activity:**
+Snipers: {metrics.get('snipers', 0)} ({metrics.get('sniper_pct', 0):.1f}%)
+Bundles: {metrics.get('bundles', 0)}
+
+👨‍💼 **Dev Status:**
+Sold: {'✅ YES' if metrics.get('dev_sold') else '❌ NO'}
+
+🔗 Scanner: {metrics.get('scanner', 'Unknown')}
+
+⏰ Detected: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}
 """
+    
     return msg.strip()
+def save_to_csv(ca, token_name, metrics, entry_mc, ath_mc, mult, outcome, data_file):
+    """Save token data to CSV for analysis"""
+    try:
+        file_exists = os.path.exists(data_file)
+        
+        row = {
+            'date': datetime.now(timezone.utc).isoformat(),
+            'token_name': token_name,
+            'ca': ca,
+            'entry_mc': int(entry_mc),
+            'age_min': metrics.get('age_min', 0),
+            'vol_5m': int(metrics.get('vol_5m', 0)),
+            'buy_tx': metrics.get('buy_tx', 0),
+            'sell_tx': metrics.get('sell_tx', 0),
+            'bonding_curve_pct': metrics.get('bonding_curve_pct', 0),
+            'dev_sold': 1 if metrics.get('dev_sold') else 0,
+            'insiders': metrics.get('insiders', 0),
+            'kols': metrics.get('kols', 0),
+            'total_holders': metrics.get('total_holders', 0),
+            'top10_pct': metrics.get('top10_pct', 0),
+            'snipers': metrics.get('snipers', 0),
+            'sniper_pct': metrics.get('sniper_pct', 0),
+            'bundles': metrics.get('bundles', 0),
+            'buy_pct': metrics.get('buy_pct', 0),
+            'sell_pct': metrics.get('sell_pct', 0),
+            'ath_mc': int(ath_mc),
+            'final_multiplier': round(mult, 2),
+            'outcome': outcome,
+        }
+        
+        with open(data_file, 'a' if file_exists else 'w', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=row.keys())
+            if not file_exists:
+                writer.writeheader()
+            writer.writerow(row)
+        
+        print(f"✅ Data saved: {token_name} {outcome} {mult:.2f}x → {data_file}", flush=True)
+    except Exception as e:
+        print(f"⚠️  CSV save error: {e}", flush=True)
 
-
-def format_report(metrics, entry_mc, ath_mc, ath_mult, verdict, elapsed_min):
-    """Format final WIN/LOSS report when token dies"""
-    """Format comprehensive token report with ALL metrics for Telegram"""
+# ==================== FINAL RESULT FORMATTING ====================
+def format_final_result(token_name, ca, metrics, entry_mc, ath_mc, ath_mult, outcome, elapsed_min):
+    """Format final WIN/LOSS result message"""
     
-    name = metrics.get('name', 'Unknown')
-    ca = metrics.get('ca', '')
-    
-    if verdict == "WIN":
+    if outcome == "WIN":
         icon = "🟢🟢🟢" if ath_mult >= 5 else "🟢🟢" if ath_mult >= 3 else "🟢"
     else:
         icon = "🔴"
     
-    report = f"{icon} {verdict} — {ath_mult:.2f}x\n\n"
-    report += f"Token: {name}\n"
-    report += f"CA: `{ca}`\n\n"
+    msg = f"""
+{icon} **{outcome} - {ath_mult:.2f}x**
+
+📊 **Token:** {token_name}
+🎯 **CA:** `{ca}`
+
+💰 **Entry:** ${entry_mc:,.0f}
+📈 **ATH:** ${ath_mc:,.0f}
+✅ **Multiplier:** {ath_mult:.2f}x
+⏱️ **Elapsed:** {elapsed_min}m
+
+📋 **Entry Metrics:**
+├─ Age: {metrics.get('age_min', 0)}m
+├─ Bonding: {metrics.get('bonding_curve_pct', 0):.1f}%
+├─ Holders: {metrics.get('total_holders', 0)}
+├─ Top10: {metrics.get('top10_pct', 0):.1f}%
+├─ KOLs: {metrics.get('kols', 0)}
+├─ Insiders: {metrics.get('insiders', 0)}
+├─ Snipers: {metrics.get('snipers', 0)} ({metrics.get('sniper_pct', 0):.1f}%)
+├─ Bundles: {metrics.get('bundles', 0)}
+├─ Buy/Sell: {metrics.get('buy_pct', 0):.1f}% / {metrics.get('sell_pct', 0):.1f}%
+└─ Dev Sold: {'✅ YES' if metrics.get('dev_sold') else '❌ NO'}
+
+🔍 **Activity:**
+├─ Vol 5m: ${metrics.get('vol_5m', 0):,.0f}
+├─ Buy Txs: {metrics.get('buy_tx', 0)}
+├─ Sell Txs: {metrics.get('sell_tx', 0)}
+└─ Scanner: {metrics.get('scanner', 'Unknown')}
+"""
     
-    # TRACKING INFO
-    report += f"Entry: ${entry_mc:,.0f}\n"
-    report += f"ATH: ${ath_mc:,.0f}\n"
-    report += f"Multiplier: {ath_mult:.2f}x\n"
-    report += f"Elapsed: {elapsed_min}m\n\n"
-    
-    # ==================== MOODENG METRICS ====================
-    if metrics.get('age'):
-        report += f"Age: {metrics.get('age')}\n"
-    if metrics.get('mc'):
-        report += f"MC: ${metrics.get('mc'):,.0f}\n"
-    if metrics.get('liquidity'):
-        report += f"Liq: ${metrics.get('liquidity'):,.0f}\n"
-    if metrics.get('fake_liq'):
-        report += f"Fake Liq: ${metrics.get('fake_liq'):,.0f}\n"
-    if metrics.get('dex_paid'):
-        report += f"DEX Paid: {metrics.get('dex_paid')}\n"
-    if metrics.get('scans'):
-        report += f"Scans: {metrics.get('scans')}\n"
-    if metrics.get('holders'):
-        report += f"Holders: {metrics.get('holders')}\n"
-    if metrics.get('top10_pct'):
-        report += f"Top10: {metrics.get('top10_pct'):.2f}%\n"
-    if metrics.get('fake_holders'):
-        report += f"Fake Holders: {metrics.get('fake_holders')}\n"
-    if metrics.get('bundles'):
-        report += f"Bundles: {metrics.get('bundles')} ({metrics.get('bundles_before', 0):.1f}% → {metrics.get('bundles_after', 0):.1f}%)\n"
-    if metrics.get('snipers'):
-        report += f"Snipers: {metrics.get('snipers')} ({metrics.get('snipers_before', 0):.1f}% → {metrics.get('snipers_after', 0):.1f}%)\n"
-    if metrics.get('first20'):
-        report += f"First20: {metrics.get('first20'):.2f}%\n"
-    if metrics.get('dev_sol'):
-        report += f"Dev SOL: {metrics.get('dev_sol'):.2f}\n"
-    if metrics.get('dev_pct'):
-        report += f"Dev%: {metrics.get('dev_pct'):.2f}%\n"
-    if metrics.get('dev_bundled'):
-        report += f"Dev Bundled: {metrics.get('dev_bundled'):.2f}%\n"
-    if metrics.get('dev_sold'):
-        report += f"Dev Sold: {metrics.get('dev_sold'):.2f}%\n"
-    if metrics.get('dev_airdrop'):
-        report += f"Dev Airdrop: {metrics.get('dev_airdrop'):.2f}%\n"
-    
-    # ==================== TESTALPHABOT/ALFA METRICS ====================
-    if metrics.get('whales_score'):
-        report += f"Whales Score: {metrics.get('whales_score')}\n"
-    if metrics.get('buys'):
-        report += f"Buys: {metrics.get('buys')} | Sells: {metrics.get('sells')}\n"
-    if metrics.get('holder_distribution'):
-        report += f"Holder Distribution: {metrics.get('holder_distribution')}\n"
-    
-    # ==================== DEX BOOSTER METRICS ====================
-    if metrics.get('boost_count'):
-        report += f"Boosts: {metrics.get('boost_count')}\n"
-    if metrics.get('bundle_pct'):
-        report += f"Bundle: {metrics.get('bundle_pct'):.2f}%\n"
-    if metrics.get('total_fees'):
-        report += f"Total Fees: {metrics.get('total_fees'):.2f} SOL\n"
-    if metrics.get('dev_created'):
-        report += f"Dev Created: {metrics.get('dev_created')}\n"
-    if metrics.get('dev_bonded'):
-        report += f"Dev Bonded: {metrics.get('dev_bonded')}\n"
-    if metrics.get('insiders_pct'):
-        report += f"Insiders: {metrics.get('insiders_pct'):.2f}%\n"
-    if metrics.get('snipers_pct'):
-        report += f"Snipers: {metrics.get('snipers_pct'):.2f}%\n"
-    if metrics.get('bots'):
-        report += f"BOTs: {metrics.get('bots')}\n"
-    if metrics.get('kols'):
-        report += f"KOLs: {metrics.get('kols')}\n"
-    
-    # ==================== KOL SIGNAL METRICS ====================
-    if metrics.get('kol_buys_count'):
-        report += f"\nKOL Buys: {metrics.get('kol_buys_count')}\n"
-        report += f"KOL SOL: {metrics.get('kol_total_sol'):.2f}◎\n"
-        if metrics.get('kol_details'):
-            for kol in metrics.get('kol_details', []):
-                report += f"  {kol[0]}: {kol[1]}◎ ({kol[2]})\n"
-    
-    # ==================== VOLUME INFO ====================
-    if metrics.get('vol_5m'):
-        report += f"\nVol5m: ${metrics.get('vol_5m'):,.0f}\n"
-    if metrics.get('vol_5m_buy'):
-        report += f"Vol5m Buy: ${metrics.get('vol_5m_buy'):,.0f} | Sell: ${metrics.get('vol_5m_sell'):,.0f}\n"
-    if metrics.get('vol_5m_tx'):
-        report += f"Vol5m Tx: {metrics.get('vol_5m_tx')}\n"
-    if metrics.get('vol_1h'):
-        report += f"Vol1h: ${metrics.get('vol_1h'):,.0f}\n"
-    if metrics.get('vol_1h_buy'):
-        report += f"Vol1h Buy: ${metrics.get('vol_1h_buy'):,.0f} | Sell: ${metrics.get('vol_1h_sell'):,.0f}\n"
-    if metrics.get('vol_1h_tx'):
-        report += f"Vol1h Tx: {metrics.get('vol_1h_tx')}\n"
-    if metrics.get('vol_24h'):
-        report += f"Vol24h: ${metrics.get('vol_24h'):,.0f}\n"
-    elif metrics.get('volume'):
-        report += f"Volume: ${metrics.get('volume'):,.0f}\n"
-    if metrics.get('txns'):
-        report += f"Txns: {metrics.get('txns')}\n"
-    
-    # ==================== SOCIALS ====================
-    if metrics.get('socials'):
-        report += f"\nSocials: {metrics.get('socials')}\n"
-    if metrics.get('socials_count'):
-        report += f"Socials Count: {metrics.get('socials_count')}\n"
-    
-    return report
+    return msg.strip()
 
 # ==================== ATH TRACKER ====================
-async def track_ath(ca: str, metrics: dict, channel_name: str, tracking_file: str, forward_chat: int, client):
+async def track_ath(ca: str, metrics: dict, data_file: str, forward_channel, client):
+    """Track token ATH and send final result when dead"""
     entry_mc = metrics.get('mc', 0)
-    print(f"🚀 {channel_name} Tracking {ca[:12]} entry MC: ${entry_mc:,.0f}", flush=True)
+    token_name = metrics.get('token_name', 'Unknown')
+    
+    print(f"🚀 Tracking {token_name} ({ca[:12]}) entry MC: ${entry_mc:,.0f}", flush=True)
     
     ath_mc = entry_mc
     ath_mult = 1.0
     elapsed = 0
     
-    add_tracking(ca, metrics, tracking_file)
+    add_tracking(ca, metrics, TRACKING_FILES['pumpfun_ultimate'])
     
     while True:
         await asyncio.sleep(ATH_CHECK_INTERVAL)
@@ -611,37 +441,45 @@ async def track_ath(ca: str, metrics: dict, channel_name: str, tracking_file: st
             ath_mc = mc
             ath_mult = mult
         
-        update_tracking(ca, tracking_file,
+        update_tracking(ca, TRACKING_FILES['pumpfun_ultimate'],
             current_mc=mc,
             ath_mc=ath_mc,
             ath_mult=ath_mult,
             elapsed_seconds=elapsed
         )
         
-        print(f"📊 {ca[:12]} MC:${mc:,.0f} {mult:.2f}x (ATH:{ath_mult:.2f}x)", flush=True)
+        print(f"📊 {token_name[:20]} MC:${mc:,.0f} {mult:.2f}x (ATH:{ath_mult:.2f}x)", flush=True)
         
         if mc <= DEAD_MC_THRESHOLD:
-            verdict = "WIN" if ath_mult >= 2.0 else "LOSS"
+            outcome = "WIN" if ath_mult >= 2.0 else "LOSS"
             elapsed_min = elapsed // 60
             
-            print(f"💀 {ca[:12]} DEAD - {verdict} {ath_mult:.2f}x", flush=True)
+            print(f"💀 {token_name} DEAD - {outcome} {ath_mult:.2f}x", flush=True)
             
-            update_tracking(ca, tracking_file, status='DEAD', verdict=verdict)
+            # ✅ FORMAT FINAL RESULT MESSAGE
+            final_msg = format_final_result(token_name, ca, metrics, entry_mc, ath_mc, ath_mult, outcome, elapsed_min)
             
-            # Format and send comprehensive report
-            report = format_report(metrics, entry_mc, ath_mc, ath_mult, verdict, elapsed_min)
-            
+            # ✅ SEND FINAL RESULT TO ALERT GROUP
             try:
-                await client.send_message(forward_chat, report)
-                print(f"📤 Report sent to {channel_name}", flush=True)
+                await client.send_message(forward_channel, final_msg)
+                print(f"✅ FINAL RESULT SENT: {token_name} {outcome} {ath_mult:.2f}x", flush=True)
             except Exception as e:
-                print(f"⚠️ Send error: {e}", flush=True)
+                print(f"⚠️  Final message error: {e}", flush=True)
             
-            remove_tracking(ca, tracking_file)
+            # Save to CSV
+            save_to_csv(ca, token_name, metrics, entry_mc, ath_mc, ath_mult, outcome, data_file)
+            
+            # Update tracking
+            update_tracking(ca, TRACKING_FILES['pumpfun_ultimate'], 
+                status='DEAD', 
+                verdict=outcome
+            )
+            
+            remove_tracking(ca, TRACKING_FILES['pumpfun_ultimate'])
             break
 
-# ==================== EVENT HANDLERS ====================
-async def create_handler(channel_name):
+# ==================== EVENT HANDLER ====================
+async def create_handler(channel_name, data_file, forward_channel):
     async def handler(event):
         text = event.message.message or ""
         
@@ -650,7 +488,7 @@ async def create_handler(channel_name):
             return
         
         ca = ca_match.group(0)
-        seen_file = SEEN_FILES[channel_name]
+        seen_file = f"seen_{channel_name}.json"
         seen = load_seen(seen_file)
         
         if ca in seen:
@@ -663,61 +501,19 @@ async def create_handler(channel_name):
             seen.add(ca)
             save_seen(seen, seen_file)
         
-        # Parse metrics based on channel
-        if channel_name == 'moodeng':
-            metrics = parse_moodeng(text)
-        elif channel_name == 'kol_signal':
-            metrics = parse_kol_signal(text)
-        elif channel_name == 'dex_screener':
-            metrics = parse_dex_booster(text)
-        elif channel_name == 'alfa_100x':
-            metrics = parse_testalphabot(text)
-        else:
-            metrics = {'name': 'Unknown', 'ca': ca, 'mc': 0}
+        # Parse metrics
+        metrics = parse_pumpfun_ultimate(text)
         
-        if metrics.get('mc', 0) <= 0:
+        if not metrics or metrics.get('mc', 0) <= 0:
             return
         
-        config = CHANNEL_MAPPING[channel_name]
+        token_name = metrics.get('token_name', 'Unknown')
+        print(f"📡 NEW TOKEN: {token_name} MC:${metrics.get('mc', 0):,.0f}", flush=True)
+        print(f"🔄 Tracking {token_name}... (will send FINAL result only)", flush=True)
         
-        # ===== APPLY ALL 5 FILTERS =====
-        filters = [
-            ('FILTER 1', FILTER_1, config.get('forward_filter1')),
-            ('FILTER 2', FILTER_2, config.get('forward_filter2')),
-            ('FILTER 3A', FILTER_3A, config.get('forward_filter3a')),
-            ('FILTER 3B', FILTER_3B, config.get('forward_filter3b')),
-            ('FILTER 3C', FILTER_3C, config.get('forward_filter3c')),
-        ]
-        
-        for filter_name, filter_rules, forward_chat in filters:
-            if passes_filter(metrics, filter_rules):
-                # Build full metrics message
-                msg = format_full_report(metrics, filter_name, ca)
-                
-                try:
-                    await event.client.send_message(forward_chat, msg)
-                    print(f"✅ {filter_name} {metrics.get('name', 'Unknown')[:20]} SENT → {forward_chat}", flush=True)
-                except Exception as e:
-                    print(f"⚠️  Send error ({filter_name}): {e}", flush=True)
-            else:
-                # Show WHY it was rejected
-                scans = metrics.get('scans', 0)
-                age = metrics.get('age_min', 0)
-                holders = metrics.get('holders', 0)
-                dev_sold = metrics.get('dev_sold', 0)
-                
-                rejection_reasons = []
-                if scans < filter_rules['scans_min']:
-                    rejection_reasons.append(f"Scans:{scans}<{filter_rules['scans_min']}")
-                if age < filter_rules['age_min']:
-                    rejection_reasons.append(f"Age:{age}<{filter_rules['age_min']}")
-                if filter_rules['holders_max'] is not None and holders > filter_rules['holders_max']:
-                    rejection_reasons.append(f"Holders:{holders}>{filter_rules['holders_max']}")
-                if dev_sold > filter_rules['dev_sold_max']:
-                    rejection_reasons.append(f"DevSold:{dev_sold}>{filter_rules['dev_sold_max']}")
-                
-                reason_str = " | ".join(rejection_reasons) if rejection_reasons else "Unknown"
-                print(f"❌ {filter_name} {metrics.get('name', 'Unknown')[:20]} REJECTED - MC:${metrics.get('mc', 0):,.0f} [{reason_str}]", flush=True)
+        # Start ATH tracking in background
+        # Final result will be sent when token dies
+        asyncio.create_task(track_ath(ca, metrics, data_file, forward_channel, event.client))
     
     return handler
 
@@ -734,7 +530,8 @@ async def main():
             client = TelegramClient(StringSession(SESSION_STRING), api_id, api_hash)
             
             for channel_name, config in CHANNEL_MAPPING.items():
-                handler = await create_handler(channel_name)
+                handler = await create_handler(channel_name, config['data_file'], config['forward_channel'])
+                # UPDATE CHANNEL ID HERE! Get it from @pfultimate
                 client.add_event_handler(handler, events.NewMessage(chats=config['monitor']))
             
             await client.connect()
@@ -743,15 +540,10 @@ async def main():
                 sys.exit(1)
             
             print("✅ Bot Running!", flush=True)
-            print("=" * 55, flush=True)
-            for ch, cfg in CHANNEL_MAPPING.items():
-                print(f"📡 {ch}: Monitor {cfg['monitor']}", flush=True)
-                print(f"   ├─ Filter 1 → {cfg['forward_filter1']}", flush=True)
-                print(f"   ├─ Filter 2 → {cfg['forward_filter2']}", flush=True)
-                print(f"   ├─ Filter 3A → {cfg['forward_filter3a']}", flush=True)
-                print(f"   ├─ Filter 3B → {cfg['forward_filter3b']}", flush=True)
-                print(f"   └─ Filter 3C → {cfg['forward_filter3c']}", flush=True)
-            print("=" * 55, flush=True)
+            print("=" * 60, flush=True)
+            print("📡 PumpFun Ultimate Data Collector", flush=True)
+            print("📊 Auto-saving to: pumpfun_data.csv", flush=True)
+            print("=" * 60, flush=True)
             
             await client.run_until_disconnected()
         
@@ -763,4 +555,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
