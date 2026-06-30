@@ -35,10 +35,8 @@ PUMPFUN_PATTERNS = {
     'ca': r'([1-9A-HJ-NP-Za-km-z]{32,44}pump)',
     'scanner': r'by\s+([^\n]+)',
     'mc': r'Cap:\s*([0-9.]+)([KMB]?)',
-    'age': r'🕐\s*([0-9]+[smh])',  # Get "12m" or "1h" or "30s"
-    'volume': r'Vol:\s*([0-9.]+)([KMB]?)',  # General volume (not 5m)
-    'buy_tx': r'●\s*(\d+)',  # Buy txs (after volume)
-    'sell_tx': r'●\s*(\d+)(?:\s*●|$)',  # Sell txs (after buy)
+    'age': r'🕐\s*([0-9]+[smh]?)',  # Get "12m" or "1h" or "30s"
+    'volume_and_txs': r'Vol:\s*([0-9.]+)([KMB]?)\s*\|\s*●\s*(\d+)\s*\|\s*●\s*(\d+)',  # Vol | BuyTx | SellTx on same line
     'bonding_curve': r'Bonding Curve:\s*([0-9.]+)%',
     'dev_status': r'Dev:\s*(✅|❌)\s*\(([^)]+)\)',
     'insiders': r'Insiders:\s*(\d+)',
@@ -180,20 +178,19 @@ def parse_pumpfun_ultimate(text):
     else:
         metrics['age_min'] = 0
     
-    vol_match = re.search(PUMPFUN_PATTERNS['volume'], text)
-    if vol_match:
-        vol_val = float(vol_match.group(1))
-        unit = vol_match.group(2) or 'K'
+    # Volume and Txs on same line: Vol: 38.7K | ● 629 | ● 408
+    vol_txs_match = re.search(PUMPFUN_PATTERNS['volume_and_txs'], text)
+    if vol_txs_match:
+        vol_val = float(vol_txs_match.group(1))
+        unit = vol_txs_match.group(2) or 'K'
         multipliers = {'K': 1000, 'M': 1_000_000, 'B': 1_000_000_000}
         metrics['vol_5m'] = vol_val * multipliers.get(unit, 1)
+        metrics['buy_tx'] = int(vol_txs_match.group(3))
+        metrics['sell_tx'] = int(vol_txs_match.group(4))
     else:
         metrics['vol_5m'] = 0
-    
-    buy_match = re.search(PUMPFUN_PATTERNS['buy_tx'], text)
-    metrics['buy_tx'] = int(buy_match.group(1)) if buy_match else 0
-    
-    sell_match = re.search(PUMPFUN_PATTERNS['sell_tx'], text)
-    metrics['sell_tx'] = int(sell_match.group(1)) if sell_match else 0
+        metrics['buy_tx'] = 0
+        metrics['sell_tx'] = 0
     
     bonding_match = re.search(PUMPFUN_PATTERNS['bonding_curve'], text)
     metrics['bonding_curve_pct'] = float(bonding_match.group(1)) if bonding_match else 0
