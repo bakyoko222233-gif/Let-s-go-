@@ -35,17 +35,18 @@ PUMPFUN_PATTERNS = {
     'ca': r'([1-9A-HJ-NP-Za-km-z]{32,44}pump)',
     'scanner': r'by\s+([^\n]+)',
     'mc': r'Cap:\s*([0-9.]+)([KMB]?)',
-    'age': r'🕐\s*([0-9]+)m',
-    'volume': r'Vol:\s*([0-9.]+)([KMB]?)',
-    'buy_tx': r'📊\s*(\d+)',
-    'sell_tx': r'💲\s*(\d+)',
+    'age': r'🕐\s*([0-9]+[smh])',  # Get "12m" or "1h" or "30s"
+    'volume': r'Vol:\s*([0-9.]+)([KMB]?)',  # General volume (not 5m)
+    'buy_tx': r'●\s*(\d+)',  # Buy txs (after volume)
+    'sell_tx': r'●\s*(\d+)(?:\s*●|$)',  # Sell txs (after buy)
     'bonding_curve': r'Bonding Curve:\s*([0-9.]+)%',
     'dev_status': r'Dev:\s*(✅|❌)\s*\(([^)]+)\)',
-    'insiders': r'🔍?Insiders:\s*(\d+)',
-    'kols': r'⭐?KOLs:\s*(\d+)',
+    'insiders': r'Insiders:\s*(\d+)',
+    'kols': r'KOLs:\s*(\d+)',
     'total_holders': r'TH:\s*(\d+)',
     'top10_pct': r'Top 10:\s*([0-9.]+)%',
-    'snipers': r'Sniper:\s*(\d+)\s+buy\s+([0-9.]+)%',
+    'holder_distribution': r'Top 10:\s*[0-9.]+%\s*\n\s*└([0-9.\s|]+)',  # Parse distribution line
+    'snipers': r'Sniper:\s*(\d+)\s+buy\s+([0-9.]+)%\s+with\s+([0-9.]+)\s*SOL',  # "13 buy 34.3% with 18.6 SOL"
     'bundles': r'Bundle:\s*(\d+)',
     'buy_pct': r'Sum\s+🅑:([0-9.]+)%',
     'sell_pct': r'Sum\s+🅢:\s*([0-9.]+)%',
@@ -164,8 +165,20 @@ def parse_pumpfun_ultimate(text):
     else:
         metrics['mc'] = 0
     
+    # Age: convert to minutes
     age_match = re.search(PUMPFUN_PATTERNS['age'], text)
-    metrics['age_min'] = int(age_match.group(1)) if age_match else 0
+    if age_match:
+        age_str = age_match.group(1)  # "12m" or "1h" or "30s"
+        age_num = int(re.search(r'(\d+)', age_str).group(1))
+        age_unit = re.search(r'[smh]', age_str).group(0)
+        if age_unit == 's':
+            metrics['age_min'] = age_num / 60
+        elif age_unit == 'h':
+            metrics['age_min'] = age_num * 60
+        else:  # m
+            metrics['age_min'] = age_num
+    else:
+        metrics['age_min'] = 0
     
     vol_match = re.search(PUMPFUN_PATTERNS['volume'], text)
     if vol_match:
@@ -203,13 +216,27 @@ def parse_pumpfun_ultimate(text):
     top10_match = re.search(PUMPFUN_PATTERNS['top10_pct'], text)
     metrics['top10_pct'] = float(top10_match.group(1)) if top10_match else 0
     
+    # Holder distribution: "3.2|2.9|2.8|2.6|1.9|1.9|1.7|1.6|1.5"
+    holder_dist_match = re.search(PUMPFUN_PATTERNS['holder_distribution'], text)
+    if holder_dist_match:
+        dist_str = holder_dist_match.group(1).strip()
+        metrics['holder_distribution'] = dist_str  # Store raw string
+        # Parse individual percentages
+        holder_pcts = [float(x.strip()) for x in dist_str.split('|') if x.strip()]
+        metrics['holder_dist_list'] = holder_pcts
+    else:
+        metrics['holder_distribution'] = ''
+        metrics['holder_dist_list'] = []
+    
     sniper_match = re.search(PUMPFUN_PATTERNS['snipers'], text)
     if sniper_match:
         metrics['snipers'] = int(sniper_match.group(1))
         metrics['sniper_pct'] = float(sniper_match.group(2))
+        metrics['sniper_sol'] = float(sniper_match.group(3))
     else:
         metrics['snipers'] = 0
         metrics['sniper_pct'] = 0
+        metrics['sniper_sol'] = 0
     
     bundle_match = re.search(PUMPFUN_PATTERNS['bundles'], text)
     metrics['bundles'] = int(bundle_match.group(1)) if bundle_match else 0
@@ -269,9 +296,10 @@ def format_final_result(token_name, ca, metrics, entry_mc, ath_mc, ath_mult, out
 ├─ Bonding: {metrics.get('bonding_curve_pct', 0):.1f}%
 ├─ Holders: {metrics.get('total_holders', 0)}
 ├─ Top10: {metrics.get('top10_pct', 0):.1f}%
+├─ Distribution: {metrics.get('holder_distribution', 'N/A')}
 ├─ KOLs: {metrics.get('kols', 0)}
 ├─ Insiders: {metrics.get('insiders', 0)}
-├─ Snipers: {metrics.get('snipers', 0)} ({metrics.get('sniper_pct', 0):.1f}%)
+├─ Snipers: {metrics.get('snipers', 0)} ({metrics.get('sniper_pct', 0):.1f}% with {metrics.get('sniper_sol', 0):.2f} SOL)
 ├─ Bundles: {metrics.get('bundles', 0)}
 ├─ Buy/Sell: {metrics.get('buy_pct', 0):.1f}% / {metrics.get('sell_pct', 0):.1f}%
 └─ Dev Sold: {'✅ YES' if metrics.get('dev_sold') else '❌ NO'}
