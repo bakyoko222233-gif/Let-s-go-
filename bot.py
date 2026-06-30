@@ -4,7 +4,6 @@ import re
 import asyncio
 import aiohttp
 import json
-import csv
 from datetime import datetime, timezone
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
@@ -16,12 +15,11 @@ api_id   = 33243817
 api_hash = '84b76a174eabcccd6bba85ec9eb4daf3'
 SESSION_STRING = os.getenv('SESSION_STRING', '')
 
-# PUMPFUN ULTIMATE CHANNEL - AUTO DATA COLLECTION
+# PUMPFUN ULTIMATE CHANNEL
 CHANNEL_MAPPING = {
     'pumpfun_ultimate': {
-        'monitor': -1002380293749,  # ✅ PumpFun Ultimate Channel
-        'data_file': 'pumpfun_data.csv',
-        'forward_channel': -5134396719,  # ✅ Your Alert Group
+        'monitor': -1002380293749,      # PumpFun Ultimate Channel
+        'forward_channel': -5134396719, # Your Alert Group
     }
 }
 
@@ -31,24 +29,7 @@ processing_locks = {ch: Lock() for ch in CHANNEL_MAPPING.keys()}
 ATH_CHECK_INTERVAL = 5 * 60
 DEAD_MC_THRESHOLD = 5000
 
-# ==================== PUMPFUN ULTIMATE REGEX PATTERNS ====================
-# Format from screenshot:
-# Zenko (ZOLANA)
-# Ez6gPDiNK7VtGe5o9vnhDHJq9QPhvEYmSo8teu8mpump
-# by MonstaScan
-# Cap: 27.1K | 🕐 9m | Search on X
-# Vol: 44.1K | 📊 702 | 💲 761
-# Bonding Curve: 97.57%
-# Dev: ✅ (sold)
-# Buyers
-# ├🔍Insiders: 2
-# └⭐KOLs: 3
-# TH: 150 (total) | Top 10: 26.5%
-# Early:
-# ├Sniper: 7 buy 25.5% with 12.1 SOL
-# ├Bundle: 0
-# ├Sum 🅑:44.3% | Sum 🅢: 30%
-
+# ==================== PUMPFUN PATTERNS ====================
 PUMPFUN_PATTERNS = {
     'token_name': r'^([^\n]+?)\s*(?:\([A-Z0-9]+\))?\s*\n([1-9A-HJ-NP-Za-km-z]{32,44}pump)',
     'ca': r'([1-9A-HJ-NP-Za-km-z]{32,44}pump)',
@@ -114,7 +95,6 @@ def add_tracking(ca, metrics, path):
             'detected_time': now.isoformat(),
             'last_update': now.isoformat(),
             'status': 'TRACKING',
-            'verdict': 'TRACKING',
         }
         save_tracking(state, path)
 
@@ -154,12 +134,11 @@ def extract_metric(text, pattern):
     m = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
     return m.group(1).strip() if m else None
 
-# ==================== PUMPFUN ULTIMATE PARSER ====================
+# ==================== PUMPFUN PARSER ====================
 def parse_pumpfun_ultimate(text):
     """Parse PumpFun Ultimate alert format"""
     metrics = {}
     
-    # Token name and CA
     token_match = re.search(PUMPFUN_PATTERNS['token_name'], text, re.MULTILINE)
     if token_match:
         metrics['token_name'] = token_match.group(1).strip()
@@ -172,75 +151,58 @@ def parse_pumpfun_ultimate(text):
         else:
             return {}
     
-    # Scanner
     scanner_match = re.search(PUMPFUN_PATTERNS['scanner'], text)
     if scanner_match:
         metrics['scanner'] = scanner_match.group(1)
     
-    # Market cap
     mc_match = re.search(PUMPFUN_PATTERNS['mc'], text)
     if mc_match:
         mc_val = float(mc_match.group(1))
         unit = mc_match.group(2) or 'K'
-        
         multipliers = {'K': 1000, 'M': 1_000_000, 'B': 1_000_000_000}
         metrics['mc'] = mc_val * multipliers.get(unit, 1)
     else:
         metrics['mc'] = 0
     
-    # Age (in minutes)
     age_match = re.search(PUMPFUN_PATTERNS['age'], text)
     metrics['age_min'] = int(age_match.group(1)) if age_match else 0
     
-    # Volume
     vol_match = re.search(PUMPFUN_PATTERNS['volume'], text)
     if vol_match:
         vol_val = float(vol_match.group(1))
         unit = vol_match.group(2) or 'K'
-        
         multipliers = {'K': 1000, 'M': 1_000_000, 'B': 1_000_000_000}
         metrics['vol_5m'] = vol_val * multipliers.get(unit, 1)
     else:
         metrics['vol_5m'] = 0
     
-    # Buy/Sell transactions
     buy_match = re.search(PUMPFUN_PATTERNS['buy_tx'], text)
     metrics['buy_tx'] = int(buy_match.group(1)) if buy_match else 0
     
     sell_match = re.search(PUMPFUN_PATTERNS['sell_tx'], text)
     metrics['sell_tx'] = int(sell_match.group(1)) if sell_match else 0
     
-    # Bonding curve
     bonding_match = re.search(PUMPFUN_PATTERNS['bonding_curve'], text)
     metrics['bonding_curve_pct'] = float(bonding_match.group(1)) if bonding_match else 0
     
-    # Dev status
     dev_match = re.search(PUMPFUN_PATTERNS['dev_status'], text)
     if dev_match:
-        dev_icon = dev_match.group(1)
-        dev_action = dev_match.group(2)
-        metrics['dev_sold'] = (dev_icon == '✅')
-        metrics['dev_action'] = dev_action
+        metrics['dev_sold'] = (dev_match.group(1) == '✅')
     else:
         metrics['dev_sold'] = False
     
-    # Insiders
     insiders_match = re.search(PUMPFUN_PATTERNS['insiders'], text)
     metrics['insiders'] = int(insiders_match.group(1)) if insiders_match else 0
     
-    # KOLs
     kols_match = re.search(PUMPFUN_PATTERNS['kols'], text)
     metrics['kols'] = int(kols_match.group(1)) if kols_match else 0
     
-    # Total holders
     holders_match = re.search(PUMPFUN_PATTERNS['total_holders'], text)
     metrics['total_holders'] = int(holders_match.group(1)) if holders_match else 0
     
-    # Top 10 %
     top10_match = re.search(PUMPFUN_PATTERNS['top10_pct'], text)
     metrics['top10_pct'] = float(top10_match.group(1)) if top10_match else 0
     
-    # Snipers
     sniper_match = re.search(PUMPFUN_PATTERNS['snipers'], text)
     if sniper_match:
         metrics['snipers'] = int(sniper_match.group(1))
@@ -249,11 +211,9 @@ def parse_pumpfun_ultimate(text):
         metrics['snipers'] = 0
         metrics['sniper_pct'] = 0
     
-    # Bundles
     bundle_match = re.search(PUMPFUN_PATTERNS['bundles'], text)
     metrics['bundles'] = int(bundle_match.group(1)) if bundle_match else 0
     
-    # Buy/Sell percentages
     buy_pct_match = re.search(PUMPFUN_PATTERNS['buy_pct'], text)
     metrics['buy_pct'] = float(buy_pct_match.group(1)) if buy_pct_match else 0
     
@@ -286,103 +246,15 @@ async def get_price_and_mc(ca: str):
 
 SOLANA_CA_PATTERN = r'[1-9A-HJ-NP-Za-km-z]{32,44}pump'
 
-# ==================== MESSAGE FORMATTING ====================
-def format_token_report(metrics, ca):
-    """Format all token details for Telegram"""
-    
-    token_name = metrics.get('token_name', 'Unknown')
-    
-    msg = f"""
-🚀 NEW TOKEN DETECTED
-
-📊 **Token Details:**
-Name: {token_name}
-CA: `{ca}`
-
-💰 **Market Data:**
-MC: ${metrics.get('mc', 0):,.0f}
-Volume (5m): ${metrics.get('vol_5m', 0):,.0f}
-Age: {metrics.get('age_min', 0)}m
-Bonding Curve: {metrics.get('bonding_curve_pct', 0):.2f}%
-
-📈 **Activity:**
-Buy Txs: {metrics.get('buy_tx', 0)}
-Sell Txs: {metrics.get('sell_tx', 0)}
-Buy %: {metrics.get('buy_pct', 0):.1f}%
-Sell %: {metrics.get('sell_pct', 0):.1f}%
-
-👥 **Holders:**
-Total Holders: {metrics.get('total_holders', 0)}
-Top 10: {metrics.get('top10_pct', 0):.2f}%
-
-🎯 **Buyers:**
-Insiders: {metrics.get('insiders', 0)}
-KOLs: {metrics.get('kols', 0)}
-
-📦 **Early Activity:**
-Snipers: {metrics.get('snipers', 0)} ({metrics.get('sniper_pct', 0):.1f}%)
-Bundles: {metrics.get('bundles', 0)}
-
-👨‍💼 **Dev Status:**
-Sold: {'✅ YES' if metrics.get('dev_sold') else '❌ NO'}
-
-🔗 Scanner: {metrics.get('scanner', 'Unknown')}
-
-⏰ Detected: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}
-"""
-    
-    return msg.strip()
-def save_to_csv(ca, token_name, metrics, entry_mc, ath_mc, mult, outcome, data_file):
-    """Save token data to CSV for analysis"""
-    try:
-        file_exists = os.path.exists(data_file)
-        
-        row = {
-            'date': datetime.now(timezone.utc).isoformat(),
-            'token_name': token_name,
-            'ca': ca,
-            'entry_mc': int(entry_mc),
-            'age_min': metrics.get('age_min', 0),
-            'vol_5m': int(metrics.get('vol_5m', 0)),
-            'buy_tx': metrics.get('buy_tx', 0),
-            'sell_tx': metrics.get('sell_tx', 0),
-            'bonding_curve_pct': metrics.get('bonding_curve_pct', 0),
-            'dev_sold': 1 if metrics.get('dev_sold') else 0,
-            'insiders': metrics.get('insiders', 0),
-            'kols': metrics.get('kols', 0),
-            'total_holders': metrics.get('total_holders', 0),
-            'top10_pct': metrics.get('top10_pct', 0),
-            'snipers': metrics.get('snipers', 0),
-            'sniper_pct': metrics.get('sniper_pct', 0),
-            'bundles': metrics.get('bundles', 0),
-            'buy_pct': metrics.get('buy_pct', 0),
-            'sell_pct': metrics.get('sell_pct', 0),
-            'ath_mc': int(ath_mc),
-            'final_multiplier': round(mult, 2),
-            'outcome': outcome,
-        }
-        
-        with open(data_file, 'a' if file_exists else 'w', newline='') as f:
-            writer = csv.DictWriter(f, fieldnames=row.keys())
-            if not file_exists:
-                writer.writeheader()
-            writer.writerow(row)
-        
-        print(f"✅ Data saved: {token_name} {outcome} {mult:.2f}x → {data_file}", flush=True)
-    except Exception as e:
-        print(f"⚠️  CSV save error: {e}", flush=True)
-
 # ==================== FINAL RESULT FORMATTING ====================
 def format_final_result(token_name, ca, metrics, entry_mc, ath_mc, ath_mult, outcome, elapsed_min):
-    """Format final WIN/LOSS result message"""
-    
+    """Format final WIN/LOSS result"""
     if outcome == "WIN":
         icon = "🟢🟢🟢" if ath_mult >= 5 else "🟢🟢" if ath_mult >= 3 else "🟢"
     else:
         icon = "🔴"
     
-    msg = f"""
-{icon} **{outcome} - {ath_mult:.2f}x**
+    msg = f"""{icon} **{outcome} - {ath_mult:.2f}x**
 
 📊 **Token:** {token_name}
 🎯 **CA:** `{ca}`
@@ -410,12 +282,11 @@ def format_final_result(token_name, ca, metrics, entry_mc, ath_mc, ath_mult, out
 ├─ Sell Txs: {metrics.get('sell_tx', 0)}
 └─ Scanner: {metrics.get('scanner', 'Unknown')}
 """
-    
     return msg.strip()
 
 # ==================== ATH TRACKER ====================
-async def track_ath(ca: str, metrics: dict, data_file: str, forward_channel, client):
-    """Track token ATH and send final result when dead"""
+async def track_ath(ca: str, metrics: dict, forward_channel, client):
+    """Track token ATH and send final result"""
     entry_mc = metrics.get('mc', 0)
     token_name = metrics.get('token_name', 'Unknown')
     
@@ -442,10 +313,7 @@ async def track_ath(ca: str, metrics: dict, data_file: str, forward_channel, cli
             ath_mult = mult
         
         update_tracking(ca, TRACKING_FILES['pumpfun_ultimate'],
-            current_mc=mc,
-            ath_mc=ath_mc,
-            ath_mult=ath_mult,
-            elapsed_seconds=elapsed
+            current_mc=mc, ath_mc=ath_mc, ath_mult=ath_mult, elapsed_seconds=elapsed
         )
         
         print(f"📊 {token_name[:20]} MC:${mc:,.0f} {mult:.2f}x (ATH:{ath_mult:.2f}x)", flush=True)
@@ -456,30 +324,22 @@ async def track_ath(ca: str, metrics: dict, data_file: str, forward_channel, cli
             
             print(f"💀 {token_name} DEAD - {outcome} {ath_mult:.2f}x", flush=True)
             
-            # ✅ FORMAT FINAL RESULT MESSAGE
+            # Format & send final result
             final_msg = format_final_result(token_name, ca, metrics, entry_mc, ath_mc, ath_mult, outcome, elapsed_min)
             
-            # ✅ SEND FINAL RESULT TO ALERT GROUP
             try:
                 await client.send_message(forward_channel, final_msg)
-                print(f"✅ FINAL RESULT SENT: {token_name} {outcome} {ath_mult:.2f}x", flush=True)
+                print(f"✅ SENT: {token_name} {outcome} {ath_mult:.2f}x", flush=True)
             except Exception as e:
-                print(f"⚠️  Final message error: {e}", flush=True)
-            
-            # Save to CSV
-            save_to_csv(ca, token_name, metrics, entry_mc, ath_mc, ath_mult, outcome, data_file)
+                print(f"⚠️ Error: {e}", flush=True)
             
             # Update tracking
-            update_tracking(ca, TRACKING_FILES['pumpfun_ultimate'], 
-                status='DEAD', 
-                verdict=outcome
-            )
-            
+            update_tracking(ca, TRACKING_FILES['pumpfun_ultimate'], status='DEAD', verdict=outcome)
             remove_tracking(ca, TRACKING_FILES['pumpfun_ultimate'])
             break
 
 # ==================== EVENT HANDLER ====================
-async def create_handler(channel_name, data_file, forward_channel):
+async def create_handler(channel_name, forward_channel):
     async def handler(event):
         text = event.message.message or ""
         
@@ -501,19 +361,15 @@ async def create_handler(channel_name, data_file, forward_channel):
             seen.add(ca)
             save_seen(seen, seen_file)
         
-        # Parse metrics
         metrics = parse_pumpfun_ultimate(text)
         
         if not metrics or metrics.get('mc', 0) <= 0:
             return
         
         token_name = metrics.get('token_name', 'Unknown')
-        print(f"📡 NEW TOKEN: {token_name} MC:${metrics.get('mc', 0):,.0f}", flush=True)
-        print(f"🔄 Tracking {token_name}... (will send FINAL result only)", flush=True)
+        print(f"📡 NEW: {token_name} MC:${metrics.get('mc', 0):,.0f}", flush=True)
         
-        # Start ATH tracking in background
-        # Final result will be sent when token dies
-        asyncio.create_task(track_ath(ca, metrics, data_file, forward_channel, event.client))
+        asyncio.create_task(track_ath(ca, metrics, forward_channel, event.client))
     
     return handler
 
@@ -530,8 +386,7 @@ async def main():
             client = TelegramClient(StringSession(SESSION_STRING), api_id, api_hash)
             
             for channel_name, config in CHANNEL_MAPPING.items():
-                handler = await create_handler(channel_name, config['data_file'], config['forward_channel'])
-                # UPDATE CHANNEL ID HERE! Get it from @pfultimate
+                handler = await create_handler(channel_name, config['forward_channel'])
                 client.add_event_handler(handler, events.NewMessage(chats=config['monitor']))
             
             await client.connect()
@@ -541,8 +396,8 @@ async def main():
             
             print("✅ Bot Running!", flush=True)
             print("=" * 60, flush=True)
-            print("📡 PumpFun Ultimate Data Collector", flush=True)
-            print("📊 Auto-saving to: pumpfun_data.csv", flush=True)
+            print("📡 PumpFun Ultimate Monitor", flush=True)
+            print("📤 Forwarding to: -5134396719", flush=True)
             print("=" * 60, flush=True)
             
             await client.run_until_disconnected()
