@@ -1,13 +1,12 @@
 import os
-import sys
 import asyncio
-from telethon import TelegramClient, events
+from telethon import TelegramClient
 from telethon.sessions import StringSession
 
 api_id   = 33243817
 api_hash = '84b76a174eabcccd6bba85ec9eb4daf3'
 SESSION_STRING = os.getenv('SESSION_STRING', '')
-CHANNEL_ID = -1002380293749
+FORWARD_CHANNEL = -5134396719
 
 async def main():
     if not SESSION_STRING:
@@ -15,7 +14,6 @@ async def main():
         return
     
     print("🔑 Connecting...", flush=True)
-    
     client = TelegramClient(StringSession(SESSION_STRING), api_id, api_hash)
     
     await client.connect()
@@ -25,21 +23,15 @@ async def main():
     
     print("✅ Connected!", flush=True)
     
-    # Try to read channel
+    # Try to send test message
     try:
-        async for message in client.iter_messages(CHANNEL_ID, limit=5):
-            print(f"📨 Message: {message.text[:100]}", flush=True)
-        print("✅ Can read channel!", flush=True)
+        test_msg = "🧪 TEST MESSAGE FROM BOT"
+        await client.send_message(FORWARD_CHANNEL, test_msg)
+        print(f"✅ SENT TEST MESSAGE TO {FORWARD_CHANNEL}!", flush=True)
     except Exception as e:
-        print(f"❌ Cannot read channel: {e}", flush=True)
+        print(f"❌ CANNOT SEND: {e}", flush=True)
     
-    # Set up event listener
-    @client.on(events.NewMessage(chats=CHANNEL_ID))
-    async def handler(event):
-        print(f"🎯 NEW MESSAGE DETECTED: {event.message.text[:100]}", flush=True)
-    
-    print("👂 Listening for new messages... (Press Ctrl+C to stop)", flush=True)
-    await client.run_until_disconnected()
+    await client.disconnect()
 
 if __name__ == "__main__":
     asyncio.run(main())
