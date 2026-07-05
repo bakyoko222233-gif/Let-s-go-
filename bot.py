@@ -18,8 +18,8 @@ SESSION_STRING = os.getenv('SESSION_STRING', '')
 # PUMPFUN ULTIMATE CHANNEL
 CHANNEL_MAPPING = {
     'pumpfun_ultimate': {
-        'monitor': -1002380293749,
-        'forward_channel': -5134396719,
+        'monitor': -1002380293749,      # PumpFun Ultimate Channel
+        'forward_channel': -5134396719, # Your Alert Group
     }
 }
 
@@ -35,21 +35,19 @@ PUMPFUN_PATTERNS = {
     'ca': r'([1-9A-HJ-NP-Za-km-z]{32,44}pump)',
     'scanner': r'by\s+([^\n]+)',
     'mc': r'Cap:\s*([0-9.]+)([KMB]?)',
-    'age': r'🕐\s*([0-9]+[smh]?)',
-    'volume': r'Vol:\s*([0-9.]+)([KMB]?)',
-    'buy_tx': r'●\s*(\d+)',
-    'sell_tx': r'●\s*(\d+)',
+    'age': r'🕐\s*([0-9]+[smh]?)',  # Get "12m" or "1h" or "30s"
+    'volume_and_txs': r'Vol:\s*([0-9.]+)([KMB]?)\s*\|\s*●\s*(\d+)\s*\|\s*●\s*(\d+)',  # Vol | BuyTx | SellTx on same line
     'bonding_curve': r'Bonding Curve:\s*([0-9.]+)%',
     'dev_status': r'Dev:\s*(✅|❌)\s*\(([^)]+)\)',
     'insiders': r'Insiders:\s*(\d+)',
     'kols': r'KOLs:\s*(\d+)',
     'total_holders': r'TH:\s*(\d+)',
     'top10_pct': r'Top 10:\s*([0-9.]+)%',
-    'holder_distribution': r'Top 10:\s*[0-9.]+%\s*\n\s*└([0-9.\s|]+)',
-    'snipers': r'Sniper:\s*(\d+)\s+buy\s+([0-9.]+)%\s+with\s+([0-9.]+)\s*SOL',
+    'holder_distribution': r'Top 10:\s*[0-9.]+%\s*\n\s*└([0-9.\s|]+)',  # Parse distribution line
+    'snipers': r'Sniper:\s*(\d+)\s+buy\s+([0-9.]+)%\s+with\s+([0-9.]+)\s*SOL',  # "13 buy 34.3% with 18.6 SOL"
     'bundles': r'Bundle:\s*(\d+)',
-    'buy_pct': r'Sum\s+●:([0-9.]+)%',
-    'sell_pct': r'Sum\s+●:\s*([0-9.]+)%',
+    'buy_pct': r'Sum\s+🅑:([0-9.]+)%',
+    'sell_pct': r'Sum\s+🅢:\s*([0-9.]+)%',
 }
 
 # ==================== HELPERS ====================
@@ -113,6 +111,29 @@ def remove_tracking(ca, path):
         save_tracking(state, path)
 
 # ==================== PARSING ====================
+def parse_value(val_str):
+    if not val_str:
+        return 0
+    try:
+        val_str = str(val_str).replace(',', '').strip()
+        num = float(re.sub(r'[KMBkmb]', '', val_str))
+        if 'K' in val_str or 'k' in val_str:
+            num *= 1000
+        elif 'M' in val_str or 'm' in val_str:
+            num *= 1000000
+        elif 'B' in val_str or 'b' in val_str:
+            num *= 1000000000
+        return num
+    except:
+        return 0
+
+def extract_metric(text, pattern):
+    if not pattern:
+        return None
+    m = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
+    return m.group(1).strip() if m else None
+
+# ==================== PUMPFUN PARSER ====================
 def parse_pumpfun_ultimate(text):
     """Parse PumpFun Ultimate alert format"""
     metrics = {}
@@ -142,12 +163,12 @@ def parse_pumpfun_ultimate(text):
     else:
         metrics['mc'] = 0
     
-    # AGE: convert to minutes
+    # Age: convert to minutes
     age_match = re.search(PUMPFUN_PATTERNS['age'], text)
     if age_match:
         age_str = age_match.group(1)  # "12m" or "1h" or "30s"
         age_num = int(re.search(r'(\d+)', age_str).group(1))
-        age_unit = re.search(r'[smh]', age_str).group(0) if re.search(r'[smh]', age_str) else 'm'
+        age_unit = re.search(r'[smh]', age_str).group(0)
         if age_unit == 's':
             metrics['age_min'] = age_num / 60
         elif age_unit == 'h':
@@ -157,20 +178,19 @@ def parse_pumpfun_ultimate(text):
     else:
         metrics['age_min'] = 0
     
-    vol_match = re.search(PUMPFUN_PATTERNS['volume'], text)
-    if vol_match:
-        vol_val = float(vol_match.group(1))
-        unit = vol_match.group(2) or 'K'
+    # Volume and Txs on same line: Vol: 38.7K | ● 629 | ● 408
+    vol_txs_match = re.search(PUMPFUN_PATTERNS['volume_and_txs'], text)
+    if vol_txs_match:
+        vol_val = float(vol_txs_match.group(1))
+        unit = vol_txs_match.group(2) or 'K'
         multipliers = {'K': 1000, 'M': 1_000_000, 'B': 1_000_000_000}
         metrics['vol_5m'] = vol_val * multipliers.get(unit, 1)
+        metrics['buy_tx'] = int(vol_txs_match.group(3))
+        metrics['sell_tx'] = int(vol_txs_match.group(4))
     else:
         metrics['vol_5m'] = 0
-    
-    buy_match = re.search(PUMPFUN_PATTERNS['buy_tx'], text)
-    metrics['buy_tx'] = int(buy_match.group(1)) if buy_match else 0
-    
-    sell_match = re.search(PUMPFUN_PATTERNS['sell_tx'], text)
-    metrics['sell_tx'] = int(sell_match.group(1)) if sell_match else 0
+        metrics['buy_tx'] = 0
+        metrics['sell_tx'] = 0
     
     bonding_match = re.search(PUMPFUN_PATTERNS['bonding_curve'], text)
     metrics['bonding_curve_pct'] = float(bonding_match.group(1)) if bonding_match else 0
@@ -193,11 +213,17 @@ def parse_pumpfun_ultimate(text):
     top10_match = re.search(PUMPFUN_PATTERNS['top10_pct'], text)
     metrics['top10_pct'] = float(top10_match.group(1)) if top10_match else 0
     
+    # Holder distribution: "3.2|2.9|2.8|2.6|1.9|1.9|1.7|1.6|1.5"
     holder_dist_match = re.search(PUMPFUN_PATTERNS['holder_distribution'], text)
     if holder_dist_match:
-        metrics['holder_distribution'] = holder_dist_match.group(1).strip()
+        dist_str = holder_dist_match.group(1).strip()
+        metrics['holder_distribution'] = dist_str  # Store raw string
+        # Parse individual percentages
+        holder_pcts = [float(x.strip()) for x in dist_str.split('|') if x.strip()]
+        metrics['holder_dist_list'] = holder_pcts
     else:
         metrics['holder_distribution'] = ''
+        metrics['holder_dist_list'] = []
     
     sniper_match = re.search(PUMPFUN_PATTERNS['snipers'], text)
     if sniper_match:
@@ -263,7 +289,7 @@ def format_final_result(token_name, ca, metrics, entry_mc, ath_mc, ath_mult, out
 ⏱️ **Elapsed:** {elapsed_min}m
 
 📋 **Entry Metrics:**
-├─ Age: {metrics.get('age_min', 0):.0f}m
+├─ Age: {metrics.get('age_min', 0)}m
 ├─ Bonding: {metrics.get('bonding_curve_pct', 0):.1f}%
 ├─ Holders: {metrics.get('total_holders', 0)}
 ├─ Top10: {metrics.get('top10_pct', 0):.1f}%
@@ -276,12 +302,11 @@ def format_final_result(token_name, ca, metrics, entry_mc, ath_mc, ath_mult, out
 └─ Dev Sold: {'✅ YES' if metrics.get('dev_sold') else '❌ NO'}
 
 🔍 **Activity:**
-├─ Vol: ${metrics.get('vol_5m', 0):,.0f}
+├─ Vol 5m: ${metrics.get('vol_5m', 0):,.0f}
 ├─ Buy Txs: {metrics.get('buy_tx', 0)}
 ├─ Sell Txs: {metrics.get('sell_tx', 0)}
 └─ Scanner: {metrics.get('scanner', 'Unknown')}
 """
-    
     return msg.strip()
 
 # ==================== ATH TRACKER ====================
@@ -324,6 +349,7 @@ async def track_ath(ca: str, metrics: dict, forward_channel, client):
             
             print(f"💀 {token_name} DEAD - {outcome} {ath_mult:.2f}x", flush=True)
             
+            # Format & send final result
             final_msg = format_final_result(token_name, ca, metrics, entry_mc, ath_mc, ath_mult, outcome, elapsed_min)
             
             try:
@@ -332,6 +358,7 @@ async def track_ath(ca: str, metrics: dict, forward_channel, client):
             except Exception as e:
                 print(f"⚠️ Error: {e}", flush=True)
             
+            # Update tracking
             update_tracking(ca, TRACKING_FILES['pumpfun_ultimate'], status='DEAD', verdict=outcome)
             remove_tracking(ca, TRACKING_FILES['pumpfun_ultimate'])
             break
@@ -365,7 +392,7 @@ async def create_handler(channel_name, forward_channel):
             return
         
         token_name = metrics.get('token_name', 'Unknown')
-        print(f"📡 NEW TOKEN: {token_name} MC:${metrics.get('mc', 0):,.0f}", flush=True)
+        print(f"📡 NEW: {token_name} MC:${metrics.get('mc', 0):,.0f}", flush=True)
         
         asyncio.create_task(track_ath(ca, metrics, forward_channel, event.client))
     
@@ -380,7 +407,6 @@ async def main():
     print("🔑 Connecting...", flush=True)
     
     while True:
-        client = None
         try:
             client = TelegramClient(StringSession(SESSION_STRING), api_id, api_hash)
             
@@ -402,21 +428,10 @@ async def main():
             await client.run_until_disconnected()
         
         except AuthKeyDuplicatedError:
-            print("⚠️ Auth duplicate - reconnecting in 5s...", flush=True)
-            if client:
-                try:
-                    await client.disconnect()
-                except:
-                    pass
-            await asyncio.sleep(5)
+            await asyncio.sleep(60)
         except Exception as e:
-            print(f"⚠️ ERROR: {e} - reconnecting in 10s...", flush=True)
-            if client:
-                try:
-                    await client.disconnect()
-                except:
-                    pass
-            await asyncio.sleep(10)
+            print(f"⚠️ ERROR: {e}", flush=True)
+            await asyncio.sleep(30)
 
 if __name__ == "__main__":
     asyncio.run(main())
