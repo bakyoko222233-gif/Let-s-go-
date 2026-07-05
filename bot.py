@@ -380,6 +380,7 @@ async def main():
     print("🔑 Connecting...", flush=True)
     
     while True:
+        client = None
         try:
             client = TelegramClient(StringSession(SESSION_STRING), api_id, api_hash)
             
@@ -401,10 +402,21 @@ async def main():
             await client.run_until_disconnected()
         
         except AuthKeyDuplicatedError:
-            await asyncio.sleep(60)
+            print("⚠️ Auth duplicate - reconnecting in 5s...", flush=True)
+            if client:
+                try:
+                    await client.disconnect()
+                except:
+                    pass
+            await asyncio.sleep(5)
         except Exception as e:
-            print(f"⚠️ ERROR: {e}", flush=True)
-            await asyncio.sleep(30)
+            print(f"⚠️ ERROR: {e} - reconnecting in 10s...", flush=True)
+            if client:
+                try:
+                    await client.disconnect()
+                except:
+                    pass
+            await asyncio.sleep(10)
 
 if __name__ == "__main__":
     asyncio.run(main())
