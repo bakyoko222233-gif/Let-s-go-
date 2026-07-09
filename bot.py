@@ -35,7 +35,7 @@ PUMPFUN_PATTERNS = {
     'top10_pct': r'Top 10:\s*([0-9.]+)%',
     'holder_distribution': r'Top 10:.*?\n\s*└([0-9.\s|]+)',
     'snipers': r'Sniper:\s*(\d+)\s+buy\s+([0-9.]+)%\s+with\s+([0-9.]+)\s*SOL',
-    'bundles': r'Bundle:\s*(\d+)',
+    'bundles': r'Bundle:\s*(\d+)\s+buy\s+([0-9.]+)%',
     'buy_pct': r'Sum\s+●:([0-9.]+)%',
     'sell_pct': r'Sum\s+●:\s*([0-9.]+)%',
 }
@@ -125,7 +125,7 @@ def parse_pumpfun(text):
         else: metrics['age_min'] = 0
     else: metrics['age_min'] = 0
     
-    # VOL + BUY/SELL TXS on same line
+    # VOL + BUY/SELL TXS on same line: Vol: 64.5K | ● 1264 | ● 844
     vol_txs_match = re.search(PUMPFUN_PATTERNS['volume_and_txs'], text)
     if vol_txs_match:
         vol_val = float(vol_txs_match.group(1))
@@ -169,14 +169,17 @@ def parse_pumpfun(text):
         metrics['snipers'], metrics['sniper_pct'], metrics['sniper_sol'] = 0, 0, 0
     
     bundle = re.search(PUMPFUN_PATTERNS['bundles'], text)
-    metrics['bundles'] = int(bundle.group(1)) if bundle else 0
-    
-    buy_sell = re.search(r'Sum\s+●:([0-9.]+)%\s*\|\s*Sum\s+●:\s*([0-9.]+)%', text)
-    if buy_sell:
-        metrics['buy_pct'] = float(buy_sell.group(1))
-        metrics['sell_pct'] = float(buy_sell.group(2))
+    if bundle:
+        metrics['bundles'] = int(bundle.group(1))
+        metrics['bundle_pct'] = float(bundle.group(2))
     else:
-        metrics['buy_pct'], metrics['sell_pct'] = 0, 0
+        metrics['bundles'], metrics['bundle_pct'] = 0, 0
+    
+    buy_pct_match = re.search(PUMPFUN_PATTERNS['buy_pct'], text)
+    metrics['buy_pct'] = float(buy_pct_match.group(1)) if buy_pct_match else 0
+    
+    sell_pct_match = re.search(PUMPFUN_PATTERNS['sell_pct'], text)
+    metrics['sell_pct'] = float(sell_pct_match.group(1)) if sell_pct_match else 0
     
     return metrics
 
@@ -220,14 +223,13 @@ def format_final(token_name, ca, metrics, entry_mc, ath_mc, ath_mult, outcome, e
 ├─ Distribution: {metrics.get('holder_distribution', 'N/A')}
 ├─ KOLs: {metrics.get('kols', 0)} | Insiders: {metrics.get('insiders', 0)}
 ├─ Snipers: {metrics.get('snipers', 0)} ({metrics.get('sniper_pct', 0):.1f}%)
-├─ Bundles: {metrics.get('bundles', 0)}
-├─ Buy/Sell: {metrics.get('buy_pct', 0):.1f}% / {metrics.get('sell_pct', 0):.1f}%
+├─ Bundles: {metrics.get('bundles', 0)} ({metrics.get('bundle_pct', 0):.1f}%)
+├─ Buy/Sell Txs: {metrics.get('buy_tx', 0)} / {metrics.get('sell_tx', 0)}
+├─ Buy/Sell %: {metrics.get('buy_pct', 0):.1f}% / {metrics.get('sell_pct', 0):.1f}%
 └─ Dev: {'✅ SOLD' if metrics.get('dev_sold') else '❌ HOLDING'}
 
 🔍 **Activity:**
 ├─ Vol: ${metrics.get('vol_5m', 0):,.0f}
-├─ Buy Txs: {metrics.get('buy_tx', 0)}
-├─ Sell Txs: {metrics.get('sell_tx', 0)}
 └─ Scanner: {metrics.get('scanner', 'Unknown')}
 """
     return msg.strip()
