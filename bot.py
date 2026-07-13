@@ -19,7 +19,9 @@ TRACKING_FILES = {ch: f"tracking_{ch}.json" for ch in CHANNEL_MAPPING.keys()}
 processing_locks = {ch: Lock() for ch in CHANNEL_MAPPING.keys()}
 ATH_CHECK_INTERVAL, DEAD_MC_THRESHOLD = 5 * 60, 5000
 
-# PATTERNS
+# Milestone messages - store message IDs to delete when new milestone reached
+MILESTONE_MESSAGES = {}  # {ca: {'2x': msg_id, '3x': msg_id, ...}}
+
 PUMPFUN_PATTERNS = {
     'token_name': r'^([^\n]+?)\s*\n([1-9A-HJ-NP-Za-km-z]{32,44}pump)',
     'ca': r'([1-9A-HJ-NP-Za-km-z]{32,44}pump)',
@@ -36,8 +38,8 @@ PUMPFUN_PATTERNS = {
     'holder_distribution': r'Top 10:.*?\n\s*└([0-9.\s|]+)',
     'snipers': r'Sniper:\s*(\d+)\s+buy\s+([0-9.]+)%\s+with\s+([0-9.]+)\s*SOL',
     'bundles': r'Bundle:\s*(\d+)\s+buy\s+([0-9.]+)%',
-    'buy_pct': r'Sum\s+●:([0-9.]+)%',
-    'sell_pct': r'Sum\s+●:\s*([0-9.]+)%',
+    'buy_pct': r'Sum\s+●:([0-9.]+)%\s*\|',
+    'sell_pct': r'Sum\s+●:\s*([0-9.]+)%(?!\s*\|)',
 }
 
 def load_seen(path):
@@ -84,6 +86,19 @@ def remove_tracking(ca, path):
         del state[ca]
         save_tracking(state, path)
 
+def get_milestone(mult):
+    """Get milestone for multiplier (2x, 3x, 4x, 5x, 10x, 15x, 20x, 50x, 100x)"""
+    if mult < 2: return None
+    elif mult < 3: return 2
+    elif mult < 4: return 3
+    elif mult < 5: return 4
+    elif mult < 10: return 5
+    elif mult < 15: return 10
+    elif mult < 20: return 15
+    elif mult < 50: return 20
+    elif mult < 100: return 50
+    else: return int(mult)  # For 100x+, use exact multiple
+
 def parse_pumpfun(text):
     metrics = {}
     
@@ -109,7 +124,6 @@ def parse_pumpfun(text):
         metrics['mc'] = mc_val * mult.get(unit, 1)
     else: metrics['mc'] = 0
     
-    # AGE: handle "1h:33m", "1h", "33m", "30s"
     age_match = re.search(PUMPFUN_PATTERNS['age'], text)
     if age_match:
         age_str = age_match.group(1)
@@ -125,7 +139,6 @@ def parse_pumpfun(text):
         else: metrics['age_min'] = 0
     else: metrics['age_min'] = 0
     
-    # VOL + BUY/SELL TXS on same line: Vol: 64.5K | ● 1264 | ● 844
     vol_txs_match = re.search(PUMPFUN_PATTERNS['volume_and_txs'], text)
     if vol_txs_match:
         vol_val = float(vol_txs_match.group(1))
@@ -199,6 +212,24 @@ async def get_price_and_mc(ca: str):
                 return (float(price) if price else None, float(mc) if mc else None)
     except: return None, None
 
+def format_milestone(token_name, ca, ath_mult, ath_mc):
+    """Format milestone message"""
+    if ath_mult >= 100:
+        icon = "🚀🚀🚀"
+    elif ath_mult >= 50:
+        icon = "🚀🚀"
+    elif ath_mult >= 20:
+        icon = "🚀"
+    else:
+        icon = "📈"
+    
+    msg = f"""{icon} **{ath_mult:.2f}x MILESTONE!**
+
+📊 {token_name}
+💰 ATH: ${ath_mc:,.0f}
+"""
+    return msg.strip()
+
 def format_final(token_name, ca, metrics, entry_mc, ath_mc, ath_mult, outcome, elapsed_min):
     if outcome == "WIN":
         icon = "🟢🟢🟢" if ath_mult >= 5 else "🟢🟢" if ath_mult >= 3 else "🟢"
@@ -241,6 +272,8 @@ async def track_ath(ca: str, metrics: dict, forward_channel, client):
     print(f"🚀 {token_name} entry: ${entry_mc:,.0f}", flush=True)
     
     ath_mc, ath_mult, elapsed = entry_mc, 1.0, 0
+    last_milestone = None
+    last_milestone_msg_id = None
     
     while True:
         await asyncio.sleep(ATH_CHECK_INTERVAL)
@@ -255,17 +288,48 @@ async def track_ath(ca: str, metrics: dict, forward_channel, client):
         
         print(f"📊 {token_name[:20]} ${mc:,.0f} {mult:.2f}x", flush=True)
         
+        # Check if milestone reached
+        current_milestone = get_milestone(ath_mult)
+        if current_milestone and current_milestone != last_milestone:
+            print(f"🎯 MILESTONE: {current_milestone}x", flush=True)
+            milestone_msg = format_milestone(token_name, ca, current_milestone, ath_mc)
+            
+            try:
+                # Delete previous milestone message
+                if last_milestone_msg_id:
+                    try:
+                        await client.delete_messages(forward_channel, last_milestone_msg_id)
+                        print(f"🗑️ Deleted {last_milestone}x message", flush=True)
+                    except:
+                        pass
+                
+                # Send new milestone
+                response = await client.send_message(forward_channel, milestone_msg)
+                last_milestone_msg_id = response.id
+                last_milestone = current_milestone
+                print(f"📤 Sent {current_milestone}x milestone", flush=True)
+            except Exception as e:
+                print(f"⚠️ Milestone error: {e}", flush=True)
+        
         if mc <= DEAD_MC_THRESHOLD:
             outcome = "WIN" if ath_mult >= 2.0 else "LOSS"
             elapsed_min = elapsed // 60
             
             print(f"💀 {outcome} {ath_mult:.2f}x", flush=True)
             
+            # Delete last milestone and send final
+            if last_milestone_msg_id:
+                try:
+                    await client.delete_messages(forward_channel, last_milestone_msg_id)
+                    print(f"🗑️ Deleted milestone before final", flush=True)
+                except:
+                    pass
+            
             msg = format_final(token_name, ca, metrics, entry_mc, ath_mc, ath_mult, outcome, elapsed_min)
             
             try:
                 await client.send_message(forward_channel, msg)
-                print(f"✅ SENT", flush=True)
+                print(f"✅ FINAL SENT", flush=True)
             except: pass
             
             break
@@ -318,7 +382,7 @@ async def main():
             
             print("✅ Bot Running!", flush=True)
             print("=" * 60, flush=True)
-            print("📡 PumpFun Monitor", flush=True)
+            print("📡 PumpFun Monitor with Milestones", flush=True)
             print("=" * 60, flush=True)
             
             await client.run_until_disconnected()
