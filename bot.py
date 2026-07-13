@@ -127,6 +127,7 @@ def parse_pumpfun(text):
     age_match = re.search(PUMPFUN_PATTERNS['age'], text)
     if age_match:
         age_str = age_match.group(1)
+        print(f"DEBUG Age: {age_str}", flush=True)
         if 'h:' in age_str:
             h, m = age_str.split('h:')
             metrics['age_min'] = int(h) * 60 + int(m.replace('m', ''))
@@ -137,7 +138,9 @@ def parse_pumpfun(text):
         elif 's' in age_str:
             metrics['age_min'] = int(age_str.replace('s', '')) / 60
         else: metrics['age_min'] = 0
-    else: metrics['age_min'] = 0
+    else: 
+        metrics['age_min'] = 0
+        print(f"DEBUG Age NOT FOUND", flush=True)
     
     vol_txs_match = re.search(PUMPFUN_PATTERNS['volume_and_txs'], text)
     if vol_txs_match:
@@ -147,10 +150,12 @@ def parse_pumpfun(text):
         metrics['vol_5m'] = vol_val * mult.get(unit, 1)
         metrics['buy_tx'] = int(vol_txs_match.group(3))
         metrics['sell_tx'] = int(vol_txs_match.group(4))
+        print(f"DEBUG Vol/Txs: {metrics['vol_5m']} / {metrics['buy_tx']} / {metrics['sell_tx']}", flush=True)
     else:
         metrics['vol_5m'] = 0
         metrics['buy_tx'] = 0
         metrics['sell_tx'] = 0
+        print(f"DEBUG Vol/Txs NOT FOUND", flush=True)
     
     bonding_match = re.search(PUMPFUN_PATTERNS['bonding_curve'], text)
     metrics['bonding_curve_pct'] = float(bonding_match.group(1)) if bonding_match else 0
@@ -194,6 +199,8 @@ def parse_pumpfun(text):
     sell_pct_match = re.search(PUMPFUN_PATTERNS['sell_pct'], text)
     metrics['sell_pct'] = float(sell_pct_match.group(1)) if sell_pct_match else 0
     
+    print(f"DEBUG Parsed: Age={metrics['age_min']}, Vol={metrics['vol_5m']}, Buy%={metrics['buy_pct']}", flush=True)
+    
     return metrics
 
 async def get_price_and_mc(ca: str):
@@ -212,8 +219,8 @@ async def get_price_and_mc(ca: str):
                 return (float(price) if price else None, float(mc) if mc else None)
     except: return None, None
 
-def format_milestone(token_name, ca, ath_mult, ath_mc):
-    """Format milestone message"""
+def format_milestone(token_name, ca, metrics, ath_mult, ath_mc, elapsed_min):
+    """Format milestone message with FULL token info"""
     if ath_mult >= 100:
         icon = "🚀🚀🚀"
     elif ath_mult >= 50:
@@ -225,8 +232,28 @@ def format_milestone(token_name, ca, ath_mult, ath_mc):
     
     msg = f"""{icon} **{ath_mult:.2f}x MILESTONE!**
 
-📊 {token_name}
-💰 ATH: ${ath_mc:,.0f}
+📊 **Token:** {token_name}
+🎯 **CA:** `{ca}`
+
+💰 **Entry:** ${metrics.get('entry_mc', 0):,.0f}
+📈 **Current:** ${ath_mc:,.0f}
+✅ **Multiplier:** {ath_mult:.2f}x
+⏱️ **Elapsed:** {elapsed_min}m
+
+📋 **Entry Metrics:**
+├─ Age: {metrics.get('age_min', 0):.0f}m
+├─ Bonding: {metrics.get('bonding_curve_pct', 0):.1f}%
+├─ Holders: {metrics.get('total_holders', 0)}
+├─ Top10: {metrics.get('top10_pct', 0):.1f}%
+├─ KOLs: {metrics.get('kols', 0)} | Insiders: {metrics.get('insiders', 0)}
+├─ Snipers: {metrics.get('snipers', 0)} ({metrics.get('sniper_pct', 0):.1f}%)
+├─ Bundles: {metrics.get('bundles', 0)} ({metrics.get('bundle_pct', 0):.1f}%)
+└─ Dev: {'✅ SOLD' if metrics.get('dev_sold') else '❌ HOLDING'}
+
+🔍 **Activity:**
+├─ Vol: ${metrics.get('vol_5m', 0):,.0f}
+├─ Buy/Sell Txs: {metrics.get('buy_tx', 0)} / {metrics.get('sell_tx', 0)}
+└─ Scanner: {metrics.get('scanner', 'Unknown')}
 """
     return msg.strip()
 
@@ -292,7 +319,8 @@ async def track_ath(ca: str, metrics: dict, forward_channel, client):
         current_milestone = get_milestone(ath_mult)
         if current_milestone and current_milestone != last_milestone:
             print(f"🎯 MILESTONE: {current_milestone}x", flush=True)
-            milestone_msg = format_milestone(token_name, ca, current_milestone, ath_mc)
+            elapsed_min = elapsed // 60
+            milestone_msg = format_milestone(token_name, ca, metrics, current_milestone, ath_mc, elapsed_min)
             
             try:
                 # Delete previous milestone message
