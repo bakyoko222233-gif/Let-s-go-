@@ -102,6 +102,9 @@ def get_milestone(mult):
 def parse_pumpfun(text):
     metrics = {}
     
+    # DEBUG: Print first 500 chars of message
+    print(f"DEBUG RAW TEXT: {text[:500]}", flush=True)
+    
     token_match = re.search(PUMPFUN_PATTERNS['token_name'], text, re.MULTILINE)
     if token_match:
         metrics['token_name'] = token_match.group(1).strip()
