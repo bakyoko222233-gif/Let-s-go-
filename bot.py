@@ -1,9 +1,11 @@
-import os, sys, re, asyncio, aiohttp, json
+import os, sys, re, asyncio, aiohttp, json, logging
 from datetime import datetime, timezone
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from telethon.errors import AuthKeyDuplicatedError
 from asyncio import Lock
+
+logging.basicConfig(level=logging.WARNING)
 
 api_id, api_hash = 33243817, '84b76a174eabcccd6bba85ec9eb4daf3'
 SESSION_STRING = os.getenv('SESSION_STRING', '')
@@ -18,9 +20,6 @@ CHANNEL_MAPPING = {
 TRACKING_FILES = {ch: f"tracking_{ch}.json" for ch in CHANNEL_MAPPING.keys()}
 processing_locks = {ch: Lock() for ch in CHANNEL_MAPPING.keys()}
 ATH_CHECK_INTERVAL, DEAD_MC_THRESHOLD = 5 * 60, 5000
-
-# Milestone messages - store message IDs to delete when new milestone reached
-MILESTONE_MESSAGES = {}  # {ca: {'2x': msg_id, '3x': msg_id, ...}}
 
 PUMPFUN_PATTERNS = {
     'token_name': r'^([^\n]+?)\s*\n([1-9A-HJ-NP-Za-km-z]{32,44}pump)',
@@ -52,58 +51,10 @@ def save_seen(seen, path):
         with open(path, 'w') as f: json.dump(list(seen), f)
     except: pass
 
-def load_tracking(path):
-    try:
-        with open(path, 'r') as f: return json.load(f)
-    except: return {}
-
-def save_tracking(state, path):
-    try:
-        with open(path, 'w') as f: json.dump(state, f, indent=2)
-    except: pass
-
-def add_tracking(ca, metrics, path):
-    state = load_tracking(path)
-    if ca not in state:
-        state[ca] = {
-            'ca': ca,
-            'token_name': metrics.get('token_name', 'Unknown'),
-            'entry_mc': metrics.get('mc', 0),
-            'ath_mc': metrics.get('mc', 0),
-            'ath_mult': 1.0,
-        }
-        save_tracking(state, path)
-
-def update_tracking(ca, path, **kwargs):
-    state = load_tracking(path)
-    if ca in state:
-        state[ca].update(kwargs)
-        save_tracking(state, path)
-
-def remove_tracking(ca, path):
-    state = load_tracking(path)
-    if ca in state:
-        del state[ca]
-        save_tracking(state, path)
-
-def get_milestone(mult):
-    """Get milestone for multiplier (2x, 3x, 4x, 5x, 10x, 15x, 20x, 50x, 100x)"""
-    if mult < 2: return None
-    elif mult < 3: return 2
-    elif mult < 4: return 3
-    elif mult < 5: return 4
-    elif mult < 10: return 5
-    elif mult < 15: return 10
-    elif mult < 20: return 15
-    elif mult < 50: return 20
-    elif mult < 100: return 50
-    else: return int(mult)  # For 100x+, use exact multiple
-
 def parse_pumpfun(text):
     metrics = {}
     
-    # DEBUG: Print first 500 chars of message
-    print(f"DEBUG RAW TEXT: {text[:500]}", flush=True)
+    print(f"DEBUG RAW: {text[:300]}", flush=True)
     
     token_match = re.search(PUMPFUN_PATTERNS['token_name'], text, re.MULTILINE)
     if token_match:
@@ -130,7 +81,6 @@ def parse_pumpfun(text):
     age_match = re.search(PUMPFUN_PATTERNS['age'], text)
     if age_match:
         age_str = age_match.group(1)
-        print(f"DEBUG Age: {age_str}", flush=True)
         if 'h:' in age_str:
             h, m = age_str.split('h:')
             metrics['age_min'] = int(h) * 60 + int(m.replace('m', ''))
@@ -141,9 +91,7 @@ def parse_pumpfun(text):
         elif 's' in age_str:
             metrics['age_min'] = int(age_str.replace('s', '')) / 60
         else: metrics['age_min'] = 0
-    else: 
-        metrics['age_min'] = 0
-        print(f"DEBUG Age NOT FOUND", flush=True)
+    else: metrics['age_min'] = 0
     
     vol_txs_match = re.search(PUMPFUN_PATTERNS['volume_and_txs'], text)
     if vol_txs_match:
@@ -153,12 +101,10 @@ def parse_pumpfun(text):
         metrics['vol_5m'] = vol_val * mult.get(unit, 1)
         metrics['buy_tx'] = int(vol_txs_match.group(3))
         metrics['sell_tx'] = int(vol_txs_match.group(4))
-        print(f"DEBUG Vol/Txs: {metrics['vol_5m']} / {metrics['buy_tx']} / {metrics['sell_tx']}", flush=True)
     else:
         metrics['vol_5m'] = 0
         metrics['buy_tx'] = 0
         metrics['sell_tx'] = 0
-        print(f"DEBUG Vol/Txs NOT FOUND", flush=True)
     
     bonding_match = re.search(PUMPFUN_PATTERNS['bonding_curve'], text)
     metrics['bonding_curve_pct'] = float(bonding_match.group(1)) if bonding_match else 0
@@ -202,7 +148,7 @@ def parse_pumpfun(text):
     sell_pct_match = re.search(PUMPFUN_PATTERNS['sell_pct'], text)
     metrics['sell_pct'] = float(sell_pct_match.group(1)) if sell_pct_match else 0
     
-    print(f"DEBUG Parsed: Age={metrics['age_min']}, Vol={metrics['vol_5m']}, Buy%={metrics['buy_pct']}", flush=True)
+    print(f"DEBUG PARSED: Age={metrics['age_min']} Vol={metrics['vol_5m']} BuyTx={metrics['buy_tx']}", flush=True)
     
     return metrics
 
@@ -222,44 +168,6 @@ async def get_price_and_mc(ca: str):
                 return (float(price) if price else None, float(mc) if mc else None)
     except: return None, None
 
-def format_milestone(token_name, ca, metrics, ath_mult, ath_mc, elapsed_min):
-    """Format milestone message with FULL token info"""
-    if ath_mult >= 100:
-        icon = "🚀🚀🚀"
-    elif ath_mult >= 50:
-        icon = "🚀🚀"
-    elif ath_mult >= 20:
-        icon = "🚀"
-    else:
-        icon = "📈"
-    
-    msg = f"""{icon} **{ath_mult:.2f}x MILESTONE!**
-
-📊 **Token:** {token_name}
-🎯 **CA:** `{ca}`
-
-💰 **Entry:** ${metrics.get('entry_mc', 0):,.0f}
-📈 **Current:** ${ath_mc:,.0f}
-✅ **Multiplier:** {ath_mult:.2f}x
-⏱️ **Elapsed:** {elapsed_min}m
-
-📋 **Entry Metrics:**
-├─ Age: {metrics.get('age_min', 0):.0f}m
-├─ Bonding: {metrics.get('bonding_curve_pct', 0):.1f}%
-├─ Holders: {metrics.get('total_holders', 0)}
-├─ Top10: {metrics.get('top10_pct', 0):.1f}%
-├─ KOLs: {metrics.get('kols', 0)} | Insiders: {metrics.get('insiders', 0)}
-├─ Snipers: {metrics.get('snipers', 0)} ({metrics.get('sniper_pct', 0):.1f}%)
-├─ Bundles: {metrics.get('bundles', 0)} ({metrics.get('bundle_pct', 0):.1f}%)
-└─ Dev: {'✅ SOLD' if metrics.get('dev_sold') else '❌ HOLDING'}
-
-🔍 **Activity:**
-├─ Vol: ${metrics.get('vol_5m', 0):,.0f}
-├─ Buy/Sell Txs: {metrics.get('buy_tx', 0)} / {metrics.get('sell_tx', 0)}
-└─ Scanner: {metrics.get('scanner', 'Unknown')}
-"""
-    return msg.strip()
-
 def format_final(token_name, ca, metrics, entry_mc, ath_mc, ath_mult, outcome, elapsed_min):
     if outcome == "WIN":
         icon = "🟢🟢🟢" if ath_mult >= 5 else "🟢🟢" if ath_mult >= 3 else "🟢"
@@ -276,22 +184,12 @@ def format_final(token_name, ca, metrics, entry_mc, ath_mc, ath_mult, outcome, e
 ✅ **Multiplier:** {ath_mult:.2f}x
 ⏱️ **Elapsed:** {elapsed_min}m
 
-📋 **Entry Metrics:**
+📋 **Metrics:**
 ├─ Age: {metrics.get('age_min', 0):.0f}m
-├─ Bonding: {metrics.get('bonding_curve_pct', 0):.1f}%
-├─ Holders: {metrics.get('total_holders', 0)}
-├─ Top10: {metrics.get('top10_pct', 0):.1f}%
-├─ Distribution: {metrics.get('holder_distribution', 'N/A')}
-├─ KOLs: {metrics.get('kols', 0)} | Insiders: {metrics.get('insiders', 0)}
-├─ Snipers: {metrics.get('snipers', 0)} ({metrics.get('sniper_pct', 0):.1f}%)
-├─ Bundles: {metrics.get('bundles', 0)} ({metrics.get('bundle_pct', 0):.1f}%)
-├─ Buy/Sell Txs: {metrics.get('buy_tx', 0)} / {metrics.get('sell_tx', 0)}
-├─ Buy/Sell %: {metrics.get('buy_pct', 0):.1f}% / {metrics.get('sell_pct', 0):.1f}%
-└─ Dev: {'✅ SOLD' if metrics.get('dev_sold') else '❌ HOLDING'}
-
-🔍 **Activity:**
 ├─ Vol: ${metrics.get('vol_5m', 0):,.0f}
-└─ Scanner: {metrics.get('scanner', 'Unknown')}
+├─ Buy/Sell: {metrics.get('buy_tx', 0)}/{metrics.get('sell_tx', 0)}
+├─ Holders: {metrics.get('total_holders', 0)}
+└─ Dev: {'✅ SOLD' if metrics.get('dev_sold') else '❌ HOLDING'}
 """
     return msg.strip()
 
@@ -302,8 +200,6 @@ async def track_ath(ca: str, metrics: dict, forward_channel, client):
     print(f"🚀 {token_name} entry: ${entry_mc:,.0f}", flush=True)
     
     ath_mc, ath_mult, elapsed = entry_mc, 1.0, 0
-    last_milestone = None
-    last_milestone_msg_id = None
     
     while True:
         await asyncio.sleep(ATH_CHECK_INTERVAL)
@@ -318,49 +214,17 @@ async def track_ath(ca: str, metrics: dict, forward_channel, client):
         
         print(f"📊 {token_name[:20]} ${mc:,.0f} {mult:.2f}x", flush=True)
         
-        # Check if milestone reached
-        current_milestone = get_milestone(ath_mult)
-        if current_milestone and current_milestone != last_milestone:
-            print(f"🎯 MILESTONE: {current_milestone}x", flush=True)
-            elapsed_min = elapsed // 60
-            milestone_msg = format_milestone(token_name, ca, metrics, current_milestone, ath_mc, elapsed_min)
-            
-            try:
-                # Delete previous milestone message
-                if last_milestone_msg_id:
-                    try:
-                        await client.delete_messages(forward_channel, last_milestone_msg_id)
-                        print(f"🗑️ Deleted {last_milestone}x message", flush=True)
-                    except:
-                        pass
-                
-                # Send new milestone
-                response = await client.send_message(forward_channel, milestone_msg)
-                last_milestone_msg_id = response.id
-                last_milestone = current_milestone
-                print(f"📤 Sent {current_milestone}x milestone", flush=True)
-            except Exception as e:
-                print(f"⚠️ Milestone error: {e}", flush=True)
-        
         if mc <= DEAD_MC_THRESHOLD:
             outcome = "WIN" if ath_mult >= 2.0 else "LOSS"
             elapsed_min = elapsed // 60
             
             print(f"💀 {outcome} {ath_mult:.2f}x", flush=True)
             
-            # Delete last milestone and send final
-            if last_milestone_msg_id:
-                try:
-                    await client.delete_messages(forward_channel, last_milestone_msg_id)
-                    print(f"🗑️ Deleted milestone before final", flush=True)
-                except:
-                    pass
-            
             msg = format_final(token_name, ca, metrics, entry_mc, ath_mc, ath_mult, outcome, elapsed_min)
             
             try:
                 await client.send_message(forward_channel, msg)
-                print(f"✅ FINAL SENT", flush=True)
+                print(f"✅ SENT", flush=True)
             except: pass
             
             break
@@ -399,6 +263,7 @@ async def main():
     print("🔑 Connecting...", flush=True)
     
     while True:
+        client = None
         try:
             client = TelegramClient(StringSession(SESSION_STRING), api_id, api_hash)
             
@@ -413,16 +278,23 @@ async def main():
             
             print("✅ Bot Running!", flush=True)
             print("=" * 60, flush=True)
-            print("📡 PumpFun Monitor with Milestones", flush=True)
+            print("📡 PumpFun Monitor", flush=True)
             print("=" * 60, flush=True)
             
             await client.run_until_disconnected()
         
         except AuthKeyDuplicatedError:
-            await asyncio.sleep(60)
+            print("⚠️ Auth duplicate, reconnecting...", flush=True)
+            await asyncio.sleep(10)
         except Exception as e:
-            print(f"⚠️ {e}", flush=True)
-            await asyncio.sleep(30)
+            print(f"⚠️ Error: {e}", flush=True)
+            await asyncio.sleep(10)
+        finally:
+            if client:
+                try:
+                    await client.disconnect()
+                except:
+                    pass
 
 if __name__ == "__main__":
     asyncio.run(main())
