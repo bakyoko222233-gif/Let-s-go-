@@ -10,13 +10,15 @@ SESSION_STRING = os.getenv('SESSION_STRING')
 client = TelegramClient(StringSession(SESSION_STRING), api_id, api_hash)
 
 @client.on(events.NewMessage(chats=-1002380293749))
-async def forward_handler(event):
-    await event.forward_to(-5134396719)
-    print(f"Forwarded: {event.message.text[:50]}")
+async def message_handler(event):
+    text = event.message.text
+    if text and 'pump' in text:
+        await client.send_message(-5134396719, text)
+        print(f"✅ Forwarded token message")
 
 async def main():
     await client.start()
-    print("Bot running - forwarding all messages")
+    print("✅ Bot running - forwarding token messages")
     await client.run_until_disconnected()
 
 if __name__ == '__main__':
