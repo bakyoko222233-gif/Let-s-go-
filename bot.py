@@ -1,12 +1,15 @@
-import os, re, asyncio, aiohttp
+import os, re, asyncio, aiohttp, logging
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
+
+# Suppress telethon warnings
+logging.basicConfig(level=logging.WARNING)
+for logger_name in ['telethon']:
+    logging.getLogger(logger_name).setLevel(logging.WARNING)
 
 api_id = 33243817
 api_hash = '84b76a174eabcccd6bba85ec9eb4daf3'
 SESSION_STRING = os.getenv('SESSION_STRING')
-
-client = TelegramClient(StringSession(SESSION_STRING), api_id, api_hash)
 
 MONITOR_CHANNEL = -1002380293749
 FORWARD_CHANNEL = -5134396719
@@ -32,36 +35,27 @@ async def get_price_and_mc(ca):
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                if resp.status != 200: 
-                    print(f"DEBUG: DexScreener error {resp.status} for {ca}", flush=True)
-                    return None, None
+                if resp.status != 200: return None, None
                 data = await resp.json()
                 pairs = data.get('pairs') or []
-                if not pairs: 
-                    print(f"DEBUG: No pairs for {ca}", flush=True)
-                    return None, None
+                if not pairs: return None, None
                 sol_pairs = [p for p in pairs if p.get('chainId') == 'solana']
                 if not sol_pairs: sol_pairs = pairs
                 best = max(sol_pairs, key=lambda p: float(p.get('liquidity', {}).get('usd', 0) or 0))
                 price = best.get('priceUsd')
                 mc = best.get('marketCap') or best.get('fdv')
-                print(f"DEBUG: Got price {price} mc {mc} for {ca}", flush=True)
                 return (float(price) if price else None, float(mc) if mc else None)
-    except Exception as e:
-        print(f"DEBUG: DexScreener error: {e}", flush=True)
+    except:
         return None, None
 
 def extract_metrics(text):
-    print(f"DEBUG: Extracting metrics from message", flush=True)
     metrics = {}
     
     name_match = re.search(r'^([^\n]+?)\s*\n', text)
     metrics['name'] = name_match.group(1) if name_match else 'Unknown'
-    print(f"DEBUG: Name: {metrics['name']}", flush=True)
     
     ca_match = re.search(r'([1-9A-HJ-NP-Za-km-z]{32,44}pump)', text)
     metrics['ca'] = ca_match.group(1) if ca_match else 'N/A'
-    print(f"DEBUG: CA: {metrics['ca']}", flush=True)
     
     cap_match = re.search(r'Cap:\s*([0-9.]+)([KMB]?)', text)
     if cap_match:
@@ -70,11 +64,9 @@ def extract_metrics(text):
         mult = {'K': 1000, 'M': 1_000_000, 'B': 1_000_000_000}
         metrics['cap'] = cap_val * mult.get(cap_unit, 1)
         metrics['cap_str'] = f"{cap_match.group(1)}{cap_match.group(2) or 'K'}"
-        print(f"DEBUG: Cap: {metrics['cap_str']}", flush=True)
     else:
         metrics['cap'] = 0
         metrics['cap_str'] = 'N/A'
-        print(f"DEBUG: Cap NOT FOUND", flush=True)
     
     age_match = re.search(r'⌛️\s*([0-9]+)m', text)
     metrics['age'] = age_match.group(1) if age_match else 'N/A'
@@ -136,7 +128,6 @@ def extract_metrics(text):
     dev_match = re.search(r'Dev:(✅|❌)', text)
     metrics['dev'] = '✅ SOLD' if dev_match and dev_match.group(1) == '✅' else '❌ HOLDING'
     
-    print(f"DEBUG: All metrics extracted successfully", flush=True)
     return metrics
 
 def format_milestone(mult, metrics, current_mc):
@@ -189,7 +180,7 @@ def format_final(metrics, entry_mc, ath_mc, mult, elapsed_min, outcome):
 ✅ **Multiplier:** {mult:.2f}x
 ⏱️ **Elapsed:** {elapsed_min}m"""
 
-async def track_ath(ca, metrics):
+async def track_ath(ca, metrics, client):
     entry_mc = metrics['cap']
     name = metrics['name']
     ath_mc = entry_mc
@@ -201,121 +192,106 @@ async def track_ath(ca, metrics):
     print(f"🚀 Tracking {name}: ${entry_mc:,.0f}", flush=True)
     
     while True:
-        await asyncio.sleep(ATH_CHECK_INTERVAL)
-        elapsed += ATH_CHECK_INTERVAL
-        
-        price, mc = await get_price_and_mc(ca)
-        if mc is None: 
-            print(f"DEBUG: Could not get price/mc for {name}", flush=True)
-            continue
-        
-        mult = mc / entry_mc if entry_mc > 0 else 0
-        if mc > ath_mc:
-            ath_mc = mc
-            ath_mult = mult
-        
-        print(f"📊 {name[:20]} ${mc:,.0f} {mult:.2f}x (ATH: {ath_mult:.2f}x)", flush=True)
-        
-        # Check milestone
-        milestone = get_milestone(ath_mult)
-        if milestone and milestone != last_milestone:
-            print(f"🎯 Milestone {milestone}x reached!", flush=True)
-            msg_text = format_milestone(milestone, metrics, ath_mc)
+        try:
+            await asyncio.sleep(ATH_CHECK_INTERVAL)
+            elapsed += ATH_CHECK_INTERVAL
             
-            try:
-                # Delete old milestone
+            price, mc = await get_price_and_mc(ca)
+            if mc is None: continue
+            
+            mult = mc / entry_mc if entry_mc > 0 else 0
+            if mc > ath_mc:
+                ath_mc = mc
+                ath_mult = mult
+            
+            print(f"📊 {name[:20]} ${mc:,.0f} {mult:.2f}x (ATH: {ath_mult:.2f}x)", flush=True)
+            
+            milestone = get_milestone(ath_mult)
+            if milestone and milestone != last_milestone:
+                print(f"🎯 Milestone {milestone}x!", flush=True)
+                msg_text = format_milestone(milestone, metrics, ath_mc)
+                
+                try:
+                    if last_msg_id:
+                        try:
+                            await client.delete_messages(FORWARD_CHANNEL, last_msg_id)
+                        except: pass
+                    
+                    response = await client.send_message(FORWARD_CHANNEL, msg_text)
+                    last_msg_id = response.id
+                    last_milestone = milestone
+                    print(f"✅ Sent {milestone}x", flush=True)
+                except Exception as e:
+                    print(f"Error: {e}", flush=True)
+            
+            if mc <= DEAD_MC_THRESHOLD:
+                outcome = "WIN" if ath_mult >= 2.0 else "LOSS"
+                elapsed_min = elapsed // 60
+                
+                print(f"💀 {outcome} {ath_mult:.2f}x", flush=True)
+                
                 if last_msg_id:
                     try:
                         await client.delete_messages(FORWARD_CHANNEL, last_msg_id)
-                        print(f"🗑️ Deleted old {last_milestone}x milestone", flush=True)
-                    except Exception as e:
-                        print(f"DEBUG: Could not delete: {e}", flush=True)
+                    except: pass
                 
-                # Send new milestone
-                response = await client.send_message(FORWARD_CHANNEL, msg_text)
-                last_msg_id = response.id
-                last_milestone = milestone
-                print(f"✅ Sent {milestone}x milestone message", flush=True)
-            except Exception as e:
-                print(f"❌ Error sending milestone: {e}", flush=True)
-        
-        # Check if dead
-        if mc <= DEAD_MC_THRESHOLD:
-            outcome = "WIN" if ath_mult >= 2.0 else "LOSS"
-            elapsed_min = elapsed // 60
-            
-            print(f"💀 Token DEAD: {outcome} {ath_mult:.2f}x", flush=True)
-            
-            # Delete last milestone
-            if last_msg_id:
+                msg_text = format_final(metrics, entry_mc, ath_mc, ath_mult, elapsed_min, outcome)
                 try:
-                    await client.delete_messages(FORWARD_CHANNEL, last_msg_id)
+                    await client.send_message(FORWARD_CHANNEL, msg_text)
                 except: pass
-            
-            # Send final
-            msg_text = format_final(metrics, entry_mc, ath_mc, ath_mult, elapsed_min, outcome)
-            try:
-                await client.send_message(FORWARD_CHANNEL, msg_text)
-                print(f"✅ Sent FINAL result: {outcome} {ath_mult:.2f}x", flush=True)
-            except Exception as e:
-                print(f"❌ Error sending final: {e}", flush=True)
-            
-            break
+                
+                break
+        except Exception as e:
+            print(f"Track error: {e}", flush=True)
+            await asyncio.sleep(10)
 
-@client.on(events.NewMessage(chats=MONITOR_CHANNEL))
-async def message_handler(event):
-    print(f"DEBUG: New message detected on channel", flush=True)
-    text = event.message.text
-    if not text:
-        print(f"DEBUG: Message has no text", flush=True)
-        return
+async def create_client():
+    client = TelegramClient(StringSession(SESSION_STRING), api_id, api_hash)
     
-    if 'pump' not in text:
-        print(f"DEBUG: Message doesn't contain 'pump'", flush=True)
-        return
+    @client.on(events.NewMessage(chats=MONITOR_CHANNEL))
+    async def message_handler(event):
+        print(f"📡 Message detected", flush=True)
+        text = event.message.text
+        if not text or 'pump' not in text: return
+        
+        try:
+            metrics = extract_metrics(text)
+            if metrics['cap'] <= 0: return
+            
+            ca = metrics['ca']
+            if ca in tracking: return
+            
+            tracking[ca] = True
+            print(f"📡 NEW: {metrics['name']} ${metrics['cap']:,.0f}", flush=True)
+            asyncio.create_task(track_ath(ca, metrics, client))
+        except Exception as e:
+            print(f"Error: {e}", flush=True)
     
-    print(f"DEBUG: Message looks like token - processing", flush=True)
-    
-    try:
-        metrics = extract_metrics(text)
-        
-        if metrics['cap'] <= 0:
-            print(f"DEBUG: Cap is 0 or invalid", flush=True)
-            return
-        
-        ca = metrics['ca']
-        if ca in tracking:
-            print(f"DEBUG: {ca} already tracking", flush=True)
-            return
-        
-        tracking[ca] = True
-        print(f"📡 NEW TOKEN DETECTED: {metrics['name']} ${metrics['cap']:,.0f}", flush=True)
-        
-        asyncio.create_task(track_ath(ca, metrics))
-    
-    except Exception as e:
-        print(f"❌ Parse error: {e}", flush=True)
-        import traceback
-        traceback.print_exc()
+    return client
 
 async def main():
     print("=" * 60, flush=True)
-    print("🔑 Connecting to Telegram...", flush=True)
+    print("🔑 Bot Starting...", flush=True)
     print("=" * 60, flush=True)
     
-    try:
-        await client.start()
-        print("✅ Connected to Telegram!", flush=True)
-        print("=" * 60, flush=True)
-        print("📡 Bot is LISTENING for tokens...", flush=True)
-        print(f"Monitor Channel: {MONITOR_CHANNEL}", flush=True)
-        print(f"Forward Channel: {FORWARD_CHANNEL}", flush=True)
-        print("=" * 60, flush=True)
-        await client.run_until_disconnected()
-    except Exception as e:
-        print(f"❌ FATAL ERROR: {e}", flush=True)
-        import traceback
-        traceback.print_exc()
+    while True:
+        client = None
+        try:
+            client = await create_client()
+            await client.connect()
+            print("✅ Connected!", flush=True)
+            print(f"Monitor: {MONITOR_CHANNEL}", flush=True)
+            print(f"Forward: {FORWARD_CHANNEL}", flush=True)
+            await client.run_until_disconnected()
+        except Exception as e:
+            print(f"⚠️ Connection error: {e}", flush=True)
+        finally:
+            if client:
+                try:
+                    await client.disconnect()
+                except: pass
+            print("⏳ Reconnecting in 10s...", flush=True)
+            await asyncio.sleep(10)
 
 if __name__ == '__main__':
     asyncio.run(main())
