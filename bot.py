@@ -32,27 +32,36 @@ async def get_price_and_mc(ca):
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                if resp.status != 200: return None, None
+                if resp.status != 200: 
+                    print(f"DEBUG: DexScreener error {resp.status} for {ca}", flush=True)
+                    return None, None
                 data = await resp.json()
                 pairs = data.get('pairs') or []
-                if not pairs: return None, None
+                if not pairs: 
+                    print(f"DEBUG: No pairs for {ca}", flush=True)
+                    return None, None
                 sol_pairs = [p for p in pairs if p.get('chainId') == 'solana']
                 if not sol_pairs: sol_pairs = pairs
                 best = max(sol_pairs, key=lambda p: float(p.get('liquidity', {}).get('usd', 0) or 0))
                 price = best.get('priceUsd')
                 mc = best.get('marketCap') or best.get('fdv')
+                print(f"DEBUG: Got price {price} mc {mc} for {ca}", flush=True)
                 return (float(price) if price else None, float(mc) if mc else None)
-    except:
+    except Exception as e:
+        print(f"DEBUG: DexScreener error: {e}", flush=True)
         return None, None
 
 def extract_metrics(text):
+    print(f"DEBUG: Extracting metrics from message", flush=True)
     metrics = {}
     
     name_match = re.search(r'^([^\n]+?)\s*\n', text)
     metrics['name'] = name_match.group(1) if name_match else 'Unknown'
+    print(f"DEBUG: Name: {metrics['name']}", flush=True)
     
     ca_match = re.search(r'([1-9A-HJ-NP-Za-km-z]{32,44}pump)', text)
     metrics['ca'] = ca_match.group(1) if ca_match else 'N/A'
+    print(f"DEBUG: CA: {metrics['ca']}", flush=True)
     
     cap_match = re.search(r'Cap:\s*([0-9.]+)([KMB]?)', text)
     if cap_match:
@@ -61,9 +70,11 @@ def extract_metrics(text):
         mult = {'K': 1000, 'M': 1_000_000, 'B': 1_000_000_000}
         metrics['cap'] = cap_val * mult.get(cap_unit, 1)
         metrics['cap_str'] = f"{cap_match.group(1)}{cap_match.group(2) or 'K'}"
+        print(f"DEBUG: Cap: {metrics['cap_str']}", flush=True)
     else:
         metrics['cap'] = 0
         metrics['cap_str'] = 'N/A'
+        print(f"DEBUG: Cap NOT FOUND", flush=True)
     
     age_match = re.search(r'⌛️\s*([0-9]+)m', text)
     metrics['age'] = age_match.group(1) if age_match else 'N/A'
@@ -86,7 +97,6 @@ def extract_metrics(text):
     top10_match = re.search(r'Top 10:\s*([0-9.]+)%', text)
     metrics['top10'] = top10_match.group(1) if top10_match else 'N/A'
     
-    # HOLDER DISTRIBUTION
     dist_match = re.search(r'Top 10:\s*[0-9.]+%\s*\n\s*└([0-9.\|]+)', text)
     metrics['distribution'] = dist_match.group(1) if dist_match else 'N/A'
     
@@ -114,7 +124,6 @@ def extract_metrics(text):
     insiders_match = re.search(r'Insiders:\s*(\d+)', text)
     metrics['insiders'] = insiders_match.group(1) if insiders_match else 'N/A'
     
-    # HOLD/SOLD PART/SOLD
     hold_match = re.search(r'🔴\s+Hold\s+(\d+)', text)
     metrics['hold'] = hold_match.group(1) if hold_match else 'N/A'
     
@@ -124,6 +133,10 @@ def extract_metrics(text):
     sold_match = re.search(r'🟢\s+Sold\s+(\d+)', text)
     metrics['sold'] = sold_match.group(1) if sold_match else 'N/A'
     
+    dev_match = re.search(r'Dev:(✅|❌)', text)
+    metrics['dev'] = '✅ SOLD' if dev_match and dev_match.group(1) == '✅' else '❌ HOLDING'
+    
+    print(f"DEBUG: All metrics extracted successfully", flush=True)
     return metrics
 
 def format_milestone(mult, metrics, current_mc):
@@ -157,6 +170,9 @@ def format_milestone(mult, metrics, current_mc):
 ├─ Bundles: {metrics['bundles']}
 ├─ KOLs: {metrics['kols']}
 ├─ Insiders: {metrics['insiders']}
+├─ Hold: {metrics['hold']}
+├─ Sold Part: {metrics['sold_part']}
+├─ Sold: {metrics['sold']}
 └─ Dev: {metrics['dev']}"""
 
 def format_final(metrics, entry_mc, ath_mc, mult, elapsed_min, outcome):
@@ -182,26 +198,28 @@ async def track_ath(ca, metrics):
     last_milestone = None
     last_msg_id = None
     
-    print(f"🚀 Tracking {name}: ${entry_mc:,.0f}")
+    print(f"🚀 Tracking {name}: ${entry_mc:,.0f}", flush=True)
     
     while True:
         await asyncio.sleep(ATH_CHECK_INTERVAL)
         elapsed += ATH_CHECK_INTERVAL
         
         price, mc = await get_price_and_mc(ca)
-        if mc is None: continue
+        if mc is None: 
+            print(f"DEBUG: Could not get price/mc for {name}", flush=True)
+            continue
         
         mult = mc / entry_mc if entry_mc > 0 else 0
         if mc > ath_mc:
             ath_mc = mc
             ath_mult = mult
         
-        print(f"📊 {name[:20]} ${mc:,.0f} {mult:.2f}x")
+        print(f"📊 {name[:20]} ${mc:,.0f} {mult:.2f}x (ATH: {ath_mult:.2f}x)", flush=True)
         
         # Check milestone
         milestone = get_milestone(ath_mult)
         if milestone and milestone != last_milestone:
-            print(f"🎯 Milestone {milestone}x!")
+            print(f"🎯 Milestone {milestone}x reached!", flush=True)
             msg_text = format_milestone(milestone, metrics, ath_mc)
             
             try:
@@ -209,21 +227,24 @@ async def track_ath(ca, metrics):
                 if last_msg_id:
                     try:
                         await client.delete_messages(FORWARD_CHANNEL, last_msg_id)
-                    except: pass
+                        print(f"🗑️ Deleted old {last_milestone}x milestone", flush=True)
+                    except Exception as e:
+                        print(f"DEBUG: Could not delete: {e}", flush=True)
                 
                 # Send new milestone
                 response = await client.send_message(FORWARD_CHANNEL, msg_text)
                 last_msg_id = response.id
                 last_milestone = milestone
+                print(f"✅ Sent {milestone}x milestone message", flush=True)
             except Exception as e:
-                print(f"Error: {e}")
+                print(f"❌ Error sending milestone: {e}", flush=True)
         
         # Check if dead
         if mc <= DEAD_MC_THRESHOLD:
             outcome = "WIN" if ath_mult >= 2.0 else "LOSS"
             elapsed_min = elapsed // 60
             
-            print(f"💀 {outcome} {ath_mult:.2f}x")
+            print(f"💀 Token DEAD: {outcome} {ath_mult:.2f}x", flush=True)
             
             # Delete last milestone
             if last_msg_id:
@@ -235,35 +256,66 @@ async def track_ath(ca, metrics):
             msg_text = format_final(metrics, entry_mc, ath_mc, ath_mult, elapsed_min, outcome)
             try:
                 await client.send_message(FORWARD_CHANNEL, msg_text)
-            except: pass
+                print(f"✅ Sent FINAL result: {outcome} {ath_mult:.2f}x", flush=True)
+            except Exception as e:
+                print(f"❌ Error sending final: {e}", flush=True)
             
             break
 
 @client.on(events.NewMessage(chats=MONITOR_CHANNEL))
 async def message_handler(event):
+    print(f"DEBUG: New message detected on channel", flush=True)
     text = event.message.text
-    if not text or 'pump' not in text: return
+    if not text:
+        print(f"DEBUG: Message has no text", flush=True)
+        return
+    
+    if 'pump' not in text:
+        print(f"DEBUG: Message doesn't contain 'pump'", flush=True)
+        return
+    
+    print(f"DEBUG: Message looks like token - processing", flush=True)
     
     try:
         metrics = extract_metrics(text)
         
-        if metrics['cap'] <= 0: return
+        if metrics['cap'] <= 0:
+            print(f"DEBUG: Cap is 0 or invalid", flush=True)
+            return
         
         ca = metrics['ca']
-        if ca in tracking: return
+        if ca in tracking:
+            print(f"DEBUG: {ca} already tracking", flush=True)
+            return
         
         tracking[ca] = True
-        print(f"📡 NEW: {metrics['name']} ${metrics['cap']:,.0f}")
+        print(f"📡 NEW TOKEN DETECTED: {metrics['name']} ${metrics['cap']:,.0f}", flush=True)
         
         asyncio.create_task(track_ath(ca, metrics))
     
     except Exception as e:
-        print(f"Parse error: {e}")
+        print(f"❌ Parse error: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
 
 async def main():
-    await client.start()
-    print("✅ Bot running - FULL metrics with holder distribution!")
-    await client.run_until_disconnected()
+    print("=" * 60, flush=True)
+    print("🔑 Connecting to Telegram...", flush=True)
+    print("=" * 60, flush=True)
+    
+    try:
+        await client.start()
+        print("✅ Connected to Telegram!", flush=True)
+        print("=" * 60, flush=True)
+        print("📡 Bot is LISTENING for tokens...", flush=True)
+        print(f"Monitor Channel: {MONITOR_CHANNEL}", flush=True)
+        print(f"Forward Channel: {FORWARD_CHANNEL}", flush=True)
+        print("=" * 60, flush=True)
+        await client.run_until_disconnected()
+    except Exception as e:
+        print(f"❌ FATAL ERROR: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
 
 if __name__ == '__main__':
     asyncio.run(main())
