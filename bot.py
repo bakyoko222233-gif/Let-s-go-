@@ -13,6 +13,7 @@ DEAD_MC_THRESHOLD = 5000
 
 tracking = {}
 seen_messages = set()
+client = None
 
 def get_milestone(mult):
     if mult < 2: return None
@@ -47,7 +48,7 @@ async def get_price_and_mc(ca):
 def extract_metrics(text):
     metrics = {}
     
-    # Remove markdown link syntax and backticks for easier parsing
+    # Remove markdown link syntax and backticks
     clean_text = text.replace('`', '').replace('**', '')
     
     name_match = re.search(r'\[([^\]]+)\]', text)
@@ -71,7 +72,7 @@ def extract_metrics(text):
     if age_match:
         hours = int(age_match.group(1))
         mins = int(age_match.group(2))
-        metrics['age'] = str(hours * 60 + mins)  # Convert to total minutes
+        metrics['age'] = str(hours * 60 + mins)
     else:
         age_match2 = re.search(r'⌛️\s*([0-9]+)m', clean_text)
         metrics['age'] = age_match2.group(1) if age_match2 else 'N/A'
@@ -94,21 +95,11 @@ def extract_metrics(text):
     top10_match = re.search(r'Top 10:\s*([0-9.]+)%', clean_text)
     metrics['top10'] = top10_match.group(1) if top10_match else 'N/A'
     
-    # Distribution format: └3.3|3.3|3.1|2.8|... or just 3.3|3.3|3.1|...
-    # First try with └
-    dist_match = re.search(r'└\s*([0-9.|\s]+?)(?:\n|Top|Early)', clean_text)
+    # DISTRIBUTION - search in full text, not cleaned
+    dist_match = re.search(r'([0-9]+\.[0-9]+(?:\|[0-9]+\.[0-9]+){9,})', text)
     if not dist_match:
-        # Try finding 10 numbers separated by pipes after Top 10
-        dist_match = re.search(r'Top 10:.*?\n\s*([0-9.]+(?:\|[0-9.]+){9})', clean_text, re.DOTALL)
-    if not dist_match:
-        # Just find any sequence of numbers with pipes (at least 10 numbers)
-        dist_match = re.search(r'([0-9.]+(?:\|[0-9.]+){9,})', clean_text)
-    
-    if dist_match:
-        dist_str = dist_match.group(1).strip().replace(' ', '')
-        metrics['distribution'] = dist_str
-    else:
-        metrics['distribution'] = 'N/A'
+        dist_match = re.search(r'([0-9]+(?:\|[0-9]+){9,})', text)
+    metrics['distribution'] = dist_match.group(1) if dist_match else 'N/A'
     
     buy_pct_match = re.search(r'Sum 🅑:([0-9.]+)%', clean_text)
     metrics['buy_pct'] = buy_pct_match.group(1) if buy_pct_match else 'N/A'
@@ -219,7 +210,7 @@ def format_final(metrics, entry_mc, ath_mc, mult, elapsed_min, outcome):
 ├─ Sold: {metrics['sold']}
 └─ Dev: {metrics['dev']}"""
 
-async def track_ath(ca, metrics, client):
+async def track_ath(ca, metrics):
     entry_mc = metrics['cap']
     name = metrics['name']
     ath_mc = entry_mc
@@ -251,15 +242,17 @@ async def track_ath(ca, metrics, client):
                 msg_text = format_milestone(milestone, metrics, ath_mc)
                 
                 try:
-                    if last_msg_id:
+                    if last_msg_id and client:
                         try:
                             await client.delete_messages(FORWARD_CHANNEL, last_msg_id)
                         except: pass
                     
-                    response = await client.send_message(FORWARD_CHANNEL, msg_text)
-                    last_msg_id = response.id
-                    last_milestone = milestone
-                except: pass
+                    if client:
+                        response = await client.send_message(FORWARD_CHANNEL, msg_text)
+                        last_msg_id = response.id
+                        last_milestone = milestone
+                except Exception as e:
+                    print(f"Send error: {e}", flush=True)
             
             if mc <= DEAD_MC_THRESHOLD:
                 outcome = "WIN" if ath_mult >= 2.0 else "LOSS"
@@ -267,20 +260,23 @@ async def track_ath(ca, metrics, client):
                 
                 print(f"💀 {outcome} {ath_mult:.2f}x", flush=True)
                 
-                if last_msg_id:
+                if last_msg_id and client:
                     try:
                         await client.delete_messages(FORWARD_CHANNEL, last_msg_id)
                     except: pass
                 
                 msg_text = format_final(metrics, entry_mc, ath_mc, ath_mult, elapsed_min, outcome)
                 try:
-                    await client.send_message(FORWARD_CHANNEL, msg_text)
+                    if client:
+                        await client.send_message(FORWARD_CHANNEL, msg_text)
                 except: pass
                 break
         except Exception as e:
             print(f"Track error: {e}", flush=True)
+            await asyncio.sleep(10)
 
-async def poll_channel(client):
+async def poll_channel():
+    global client
     print("📡 Starting channel poller...", flush=True)
     
     while True:
@@ -296,21 +292,10 @@ async def poll_channel(client):
                     continue
                 
                 seen_messages.add(msg_id)
-                
-                # Try to get full message with all entities
-                try:
-                    full_msg = await client.get_messages(MONITOR_CHANNEL, ids=msg_id)
-                    text = full_msg.text or ""
-                except:
-                    pass
-                
                 print(f"📡 NEW MESSAGE DETECTED", flush=True)
-                print(f"DEBUG: Message length: {len(text)}", flush=True)
-                print(f"DEBUG: First 500 chars: {text[:500]}", flush=True)
                 
                 try:
-                    metrics = extract_metrics(message.text)
-                    print(f"DEBUG DIST: '{metrics['distribution']}'", flush=True)
+                    metrics = extract_metrics(text)
                     if metrics['cap'] <= 0: continue
                     
                     ca = metrics['ca']
@@ -318,7 +303,7 @@ async def poll_channel(client):
                     
                     tracking[ca] = True
                     print(f"📡 NEW TOKEN: {metrics['name']} ${metrics['cap']:,.0f}", flush=True)
-                    asyncio.create_task(track_ath(ca, metrics, client))
+                    asyncio.create_task(track_ath(ca, metrics))
                 except Exception as e:
                     print(f"Parse error: {e}", flush=True)
             
@@ -328,18 +313,19 @@ async def poll_channel(client):
             await asyncio.sleep(10)
 
 async def main():
-    client = TelegramClient(StringSession(SESSION_STRING), api_id, api_hash)
+    global client
     
     print("=" * 60, flush=True)
     print("🔑 Bot Starting (Polling Mode)...", flush=True)
+    
+    client = TelegramClient(StringSession(SESSION_STRING), api_id, api_hash)
     await client.start()
     print("✅ Connected!", flush=True)
     print(f"Monitor: {MONITOR_CHANNEL}", flush=True)
     print(f"Forward: {FORWARD_CHANNEL}", flush=True)
     print("=" * 60, flush=True)
     
-    await poll_channel(client)
+    await poll_channel()
 
 if __name__ == '__main__':
     asyncio.run(main())
-
