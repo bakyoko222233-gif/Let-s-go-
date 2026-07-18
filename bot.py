@@ -1,11 +1,6 @@
-import os, re, asyncio, aiohttp, logging
-from telethon import TelegramClient, events
+import os, re, asyncio, aiohttp
+from telethon import TelegramClient
 from telethon.sessions import StringSession
-
-# Suppress telethon warnings
-logging.basicConfig(level=logging.WARNING)
-for logger_name in ['telethon']:
-    logging.getLogger(logger_name).setLevel(logging.WARNING)
 
 api_id = 33243817
 api_hash = '84b76a174eabcccd6bba85ec9eb4daf3'
@@ -17,6 +12,7 @@ ATH_CHECK_INTERVAL = 5 * 60
 DEAD_MC_THRESHOLD = 5000
 
 tracking = {}
+seen_messages = set()
 
 def get_milestone(mult):
     if mult < 2: return None
@@ -204,7 +200,7 @@ async def track_ath(ca, metrics, client):
                 ath_mc = mc
                 ath_mult = mult
             
-            print(f"📊 {name[:20]} ${mc:,.0f} {mult:.2f}x (ATH: {ath_mult:.2f}x)", flush=True)
+            print(f"📊 {name[:20]} ${mc:,.0f} {mult:.2f}x", flush=True)
             
             milestone = get_milestone(ath_mult)
             if milestone and milestone != last_milestone:
@@ -220,9 +216,7 @@ async def track_ath(ca, metrics, client):
                     response = await client.send_message(FORWARD_CHANNEL, msg_text)
                     last_msg_id = response.id
                     last_milestone = milestone
-                    print(f"✅ Sent {milestone}x", flush=True)
-                except Exception as e:
-                    print(f"Error: {e}", flush=True)
+                except: pass
             
             if mc <= DEAD_MC_THRESHOLD:
                 outcome = "WIN" if ath_mult >= 2.0 else "LOSS"
@@ -239,59 +233,57 @@ async def track_ath(ca, metrics, client):
                 try:
                     await client.send_message(FORWARD_CHANNEL, msg_text)
                 except: pass
-                
                 break
         except Exception as e:
             print(f"Track error: {e}", flush=True)
-            await asyncio.sleep(10)
 
-async def create_client():
-    client = TelegramClient(StringSession(SESSION_STRING), api_id, api_hash)
-    
-    @client.on(events.NewMessage(chats=MONITOR_CHANNEL))
-    async def message_handler(event):
-        print(f"📡 Message detected", flush=True)
-        text = event.message.text
-        if not text or 'pump' not in text: return
-        
-        try:
-            metrics = extract_metrics(text)
-            if metrics['cap'] <= 0: return
-            
-            ca = metrics['ca']
-            if ca in tracking: return
-            
-            tracking[ca] = True
-            print(f"📡 NEW: {metrics['name']} ${metrics['cap']:,.0f}", flush=True)
-            asyncio.create_task(track_ath(ca, metrics, client))
-        except Exception as e:
-            print(f"Error: {e}", flush=True)
-    
-    return client
-
-async def main():
-    print("=" * 60, flush=True)
-    print("🔑 Bot Starting...", flush=True)
-    print("=" * 60, flush=True)
+async def poll_channel(client):
+    print("📡 Starting channel poller...", flush=True)
     
     while True:
-        client = None
         try:
-            client = await create_client()
-            await client.connect()
-            print("✅ Connected!", flush=True)
-            print(f"Monitor: {MONITOR_CHANNEL}", flush=True)
-            print(f"Forward: {FORWARD_CHANNEL}", flush=True)
-            await client.run_until_disconnected()
-        except Exception as e:
-            print(f"⚠️ Connection error: {e}", flush=True)
-        finally:
-            if client:
+            print("🔍 Polling for new messages...", flush=True)
+            async for message in client.iter_messages(MONITOR_CHANNEL, limit=10):
+                if not message.text or 'pump' not in message.text:
+                    continue
+                
+                msg_id = message.id
+                if msg_id in seen_messages:
+                    continue
+                
+                seen_messages.add(msg_id)
+                print(f"📡 NEW MESSAGE: {message.text[:50]}", flush=True)
+                
                 try:
-                    await client.disconnect()
-                except: pass
-            print("⏳ Reconnecting in 10s...", flush=True)
+                    metrics = extract_metrics(message.text)
+                    if metrics['cap'] <= 0: continue
+                    
+                    ca = metrics['ca']
+                    if ca in tracking: continue
+                    
+                    tracking[ca] = True
+                    print(f"📡 NEW TOKEN: {metrics['name']} ${metrics['cap']:,.0f}", flush=True)
+                    asyncio.create_task(track_ath(ca, metrics, client))
+                except Exception as e:
+                    print(f"Parse error: {e}", flush=True)
+            
+            await asyncio.sleep(60)
+        except Exception as e:
+            print(f"Poll error: {e}", flush=True)
             await asyncio.sleep(10)
+
+async def main():
+    client = TelegramClient(StringSession(SESSION_STRING), api_id, api_hash)
+    
+    print("=" * 60, flush=True)
+    print("🔑 Bot Starting (Polling Mode)...", flush=True)
+    await client.start()
+    print("✅ Connected!", flush=True)
+    print(f"Monitor: {MONITOR_CHANNEL}", flush=True)
+    print(f"Forward: {FORWARD_CHANNEL}", flush=True)
+    print("=" * 60, flush=True)
+    
+    await poll_channel(client)
 
 if __name__ == '__main__':
     asyncio.run(main())
