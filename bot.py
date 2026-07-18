@@ -47,13 +47,16 @@ async def get_price_and_mc(ca):
 def extract_metrics(text):
     metrics = {}
     
-    name_match = re.search(r'^([^\n]+?)\s*\n', text)
+    # Remove markdown link syntax and backticks for easier parsing
+    clean_text = text.replace('`', '').replace('**', '')
+    
+    name_match = re.search(r'\[([^\]]+)\]', text)
     metrics['name'] = name_match.group(1) if name_match else 'Unknown'
     
     ca_match = re.search(r'([1-9A-HJ-NP-Za-km-z]{32,44}pump)', text)
     metrics['ca'] = ca_match.group(1) if ca_match else 'N/A'
     
-    cap_match = re.search(r'Cap:\s*([0-9.]+)([KMB]?)', text)
+    cap_match = re.search(r'Cap:\s*\*?\*?([0-9.]+)([KMB]?)\*?\*?', clean_text)
     if cap_match:
         cap_val = float(cap_match.group(1))
         cap_unit = cap_match.group(2) or 'K'
@@ -64,64 +67,64 @@ def extract_metrics(text):
         metrics['cap'] = 0
         metrics['cap_str'] = 'N/A'
     
-    age_match = re.search(r'⌛️\s*([0-9]+)m', text)
+    age_match = re.search(r'⌛️\s*([0-9]+)m', clean_text)
     metrics['age'] = age_match.group(1) if age_match else 'N/A'
     
-    vol_match = re.search(r'Vol:\s*([0-9.]+)([KMB]?)', text)
+    vol_match = re.search(r'Vol:\s*\*?\*?([0-9.]+)([KMB]?)\*?\*?', clean_text)
     metrics['vol'] = f"{vol_match.group(1)}{vol_match.group(2) or 'K'}" if vol_match else 'N/A'
     
-    buy_match = re.search(r'🅑\s*(\d+)', text)
+    buy_match = re.search(r'🅑\s*(\d+)', clean_text)
     metrics['buy_tx'] = buy_match.group(1) if buy_match else 'N/A'
     
-    sell_match = re.search(r'🅢\s*(\d+)', text)
+    sell_match = re.search(r'🅢\s*(\d+)', clean_text)
     metrics['sell_tx'] = sell_match.group(1) if sell_match else 'N/A'
     
-    bonding_match = re.search(r'Bonding Curve:\s*([0-9.]+)%', text)
+    bonding_match = re.search(r'Bonding\s+Curve:\s*\*?\*?([0-9.]+)\*?\*?%', clean_text)
     metrics['bonding'] = bonding_match.group(1) if bonding_match else 'N/A'
     
-    holders_match = re.search(r'TH:\s*(\d+)', text)
+    holders_match = re.search(r'TH:\s*(\d+)', clean_text)
     metrics['holders'] = holders_match.group(1) if holders_match else 'N/A'
     
-    top10_match = re.search(r'Top 10:\s*([0-9.]+)%', text)
+    top10_match = re.search(r'Top 10:\s*([0-9.]+)%', clean_text)
     metrics['top10'] = top10_match.group(1) if top10_match else 'N/A'
     
-    dist_match = re.search(r'Top 10:\s*[0-9.]+%\s*\n\s*└([0-9.\|]+)', text)
+    dist_match = re.search(r'Top 10:\s*[0-9.]+%\s*\n\s*└([0-9.\|]+)', clean_text)
     metrics['distribution'] = dist_match.group(1) if dist_match else 'N/A'
     
-    buy_pct_match = re.search(r'Sum 🅑:([0-9.]+)%', text)
+    buy_pct_match = re.search(r'Sum 🅑:([0-9.]+)%', clean_text)
     metrics['buy_pct'] = buy_pct_match.group(1) if buy_pct_match else 'N/A'
     
-    sell_pct_match = re.search(r'Sum 🅢:\s*([0-9.]+)%', text)
+    sell_pct_match = re.search(r'Sum 🅢:\s*([0-9.]+)%', clean_text)
     metrics['sell_pct'] = sell_pct_match.group(1) if sell_pct_match else 'N/A'
     
-    sniper_match = re.search(r'Sniper:\s*(\d+)\s+buy\s+([0-9.]+)%\s+with\s+([0-9.]+)\s+SOL', text)
+    sniper_match = re.search(r'Sniper:\s*(\d+)\s+buy\s+([0-9.]+)%\s+with\s+([0-9.]+)\s+SOL', clean_text)
     if sniper_match:
         metrics['snipers'] = f"{sniper_match.group(1)} buy {sniper_match.group(2)}% with {sniper_match.group(3)} SOL"
     else:
         metrics['snipers'] = 'N/A'
     
-    bundle_match = re.search(r'Bundle:\s*(\d+)(?:\s+buy\s+([0-9.]+)%)?', text)
+    bundle_match = re.search(r'Bundle:\s*(\d+)(?:\s+buy\s+([0-9.]+)%)?', clean_text)
     if bundle_match and bundle_match.group(1) != '0':
         metrics['bundles'] = f"{bundle_match.group(1)} buy {bundle_match.group(2) or '0'}%"
     else:
         metrics['bundles'] = '0'
     
-    kols_match = re.search(r'KOLs:\s*(\d+)', text)
+    kols_match = re.search(r'KOLs:\s*(\d+)', clean_text)
     metrics['kols'] = kols_match.group(1) if kols_match else 'N/A'
     
-    insiders_match = re.search(r'Insiders:\s*(\d+)', text)
+    insiders_match = re.search(r'Insiders:\s*(\d+)', clean_text)
     metrics['insiders'] = insiders_match.group(1) if insiders_match else 'N/A'
     
-    hold_match = re.search(r'🔴\s+Hold\s+(\d+)', text)
+    hold_match = re.search(r'🔴\s+Hold\s+(\d+)', clean_text)
     metrics['hold'] = hold_match.group(1) if hold_match else 'N/A'
     
-    sold_part_match = re.search(r'🟡\s+Sold part\s+(\d+)', text)
+    sold_part_match = re.search(r'🟡\s+Sold part\s+(\d+)', clean_text)
     metrics['sold_part'] = sold_part_match.group(1) if sold_part_match else 'N/A'
     
-    sold_match = re.search(r'🟢\s+Sold\s+(\d+)', text)
+    sold_match = re.search(r'🟢\s+Sold\s+(\d+)', clean_text)
     metrics['sold'] = sold_match.group(1) if sold_match else 'N/A'
     
-    dev_match = re.search(r'Dev:(✅|❌)', text)
+    dev_match = re.search(r'Dev:(✅|❌)', clean_text)
     metrics['dev'] = '✅ SOLD' if dev_match and dev_match.group(1) == '✅' else '❌ HOLDING'
     
     return metrics
