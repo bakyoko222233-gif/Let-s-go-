@@ -244,7 +244,8 @@ async def poll_channel(client):
         try:
             print("🔍 Polling for new messages...", flush=True)
             async for message in client.iter_messages(MONITOR_CHANNEL, limit=10):
-                if not message.text or 'pump' not in message.text:
+                text = message.text or ""
+                if not text or 'pump' not in text:
                     continue
                 
                 msg_id = message.id
@@ -252,8 +253,17 @@ async def poll_channel(client):
                     continue
                 
                 seen_messages.add(msg_id)
+                
+                # Try to get full message with all entities
+                try:
+                    full_msg = await client.get_messages(MONITOR_CHANNEL, ids=msg_id)
+                    text = full_msg.text or ""
+                except:
+                    pass
+                
                 print(f"📡 NEW MESSAGE DETECTED", flush=True)
-                print(f"DEBUG: First 200 chars: {message.text[:200]}", flush=True)
+                print(f"DEBUG: Message length: {len(text)}", flush=True)
+                print(f"DEBUG: First 500 chars: {text[:500]}", flush=True)
                 
                 try:
                     metrics = extract_metrics(message.text)
@@ -288,4 +298,3 @@ async def main():
 
 if __name__ == '__main__':
     asyncio.run(main())
-
