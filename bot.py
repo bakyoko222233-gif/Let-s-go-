@@ -252,7 +252,8 @@ async def poll_channel(client):
                     continue
                 
                 seen_messages.add(msg_id)
-                print(f"📡 NEW MESSAGE: {message.text[:50]}", flush=True)
+                print(f"📡 NEW MESSAGE DETECTED", flush=True)
+                print(f"DEBUG: First 200 chars: {message.text[:200]}", flush=True)
                 
                 try:
                     metrics = extract_metrics(message.text)
@@ -287,3 +288,4 @@ async def main():
 
 if __name__ == '__main__':
     asyncio.run(main())
+
