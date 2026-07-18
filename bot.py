@@ -94,8 +94,16 @@ def extract_metrics(text):
     top10_match = re.search(r'Top 10:\s*([0-9.]+)%', clean_text)
     metrics['top10'] = top10_match.group(1) if top10_match else 'N/A'
     
-    # Distribution format: └3.3|3.3|3.1|2.8|...
-    dist_match = re.search(r'└([0-9.|\s]+?)(?:\n|$|Top)', clean_text)
+    # Distribution format: └3.3|3.3|3.1|2.8|... or just 3.3|3.3|3.1|...
+    # First try with └
+    dist_match = re.search(r'└\s*([0-9.|\s]+?)(?:\n|Top|Early)', clean_text)
+    if not dist_match:
+        # Try finding 10 numbers separated by pipes after Top 10
+        dist_match = re.search(r'Top 10:.*?\n\s*([0-9.]+(?:\|[0-9.]+){9})', clean_text, re.DOTALL)
+    if not dist_match:
+        # Just find any sequence of numbers with pipes (at least 10 numbers)
+        dist_match = re.search(r'([0-9.]+(?:\|[0-9.]+){9,})', clean_text)
+    
     if dist_match:
         dist_str = dist_match.group(1).strip().replace(' ', '')
         metrics['distribution'] = dist_str
@@ -302,6 +310,7 @@ async def poll_channel(client):
                 
                 try:
                     metrics = extract_metrics(message.text)
+                    print(f"DEBUG DIST: '{metrics['distribution']}'", flush=True)
                     if metrics['cap'] <= 0: continue
                     
                     ca = metrics['ca']
