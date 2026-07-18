@@ -67,8 +67,14 @@ def extract_metrics(text):
         metrics['cap'] = 0
         metrics['cap_str'] = 'N/A'
     
-    age_match = re.search(r'⌛️\s*([0-9]+)m', clean_text)
-    metrics['age'] = age_match.group(1) if age_match else 'N/A'
+    age_match = re.search(r'⌛️\s*([0-9]+)h:([0-9]+)m', clean_text)
+    if age_match:
+        hours = int(age_match.group(1))
+        mins = int(age_match.group(2))
+        metrics['age'] = str(hours * 60 + mins)  # Convert to total minutes
+    else:
+        age_match2 = re.search(r'⌛️\s*([0-9]+)m', clean_text)
+        metrics['age'] = age_match2.group(1) if age_match2 else 'N/A'
     
     vol_match = re.search(r'Vol:\s*\*?\*?([0-9.]+)([KMB]?)\*?\*?', clean_text)
     metrics['vol'] = f"{vol_match.group(1)}{vol_match.group(2) or 'K'}" if vol_match else 'N/A'
@@ -88,8 +94,11 @@ def extract_metrics(text):
     top10_match = re.search(r'Top 10:\s*([0-9.]+)%', clean_text)
     metrics['top10'] = top10_match.group(1) if top10_match else 'N/A'
     
-    dist_match = re.search(r'Top 10:\s*[0-9.]+%\s*\n\s*└([0-9.\|]+)', clean_text)
-    metrics['distribution'] = dist_match.group(1) if dist_match else 'N/A'
+    dist_match = re.search(r'Top 10:\s*[0-9.]+%\s*\n?\s*└([0-9.\|]+)', clean_text)
+    if not dist_match:
+        # Try alternative format without newline
+        dist_match = re.search(r'└([0-9.\|]+)', clean_text)
+    metrics['distribution'] = dist_match.group(1).strip() if dist_match else 'N/A'
     
     buy_pct_match = re.search(r'Sum 🅑:([0-9.]+)%', clean_text)
     metrics['buy_pct'] = buy_pct_match.group(1) if buy_pct_match else 'N/A'
@@ -177,7 +186,28 @@ def format_final(metrics, entry_mc, ath_mc, mult, elapsed_min, outcome):
 💰 **Entry:** ${entry_mc:,.0f}
 📈 **ATH:** ${ath_mc:,.0f}
 ✅ **Multiplier:** {mult:.2f}x
-⏱️ **Elapsed:** {elapsed_min}m"""
+⏱️ **Elapsed:** {elapsed_min}m
+
+📋 **Metrics:**
+├─ Age: {metrics['age']}m
+├─ Cap: {metrics['cap_str']}
+├─ Vol: {metrics['vol']}
+├─ Buy Txs: {metrics['buy_tx']}
+├─ Sell Txs: {metrics['sell_tx']}
+├─ Bonding: {metrics['bonding']}%
+├─ Holders: {metrics['holders']}
+├─ Top10: {metrics['top10']}%
+├─ Distribution: {metrics['distribution']}
+├─ Buy %: {metrics['buy_pct']}%
+├─ Sell %: {metrics['sell_pct']}%
+├─ Snipers: {metrics['snipers']}
+├─ Bundles: {metrics['bundles']}
+├─ KOLs: {metrics['kols']}
+├─ Insiders: {metrics['insiders']}
+├─ Hold: {metrics['hold']}
+├─ Sold Part: {metrics['sold_part']}
+├─ Sold: {metrics['sold']}
+└─ Dev: {metrics['dev']}"""
 
 async def track_ath(ca, metrics, client):
     entry_mc = metrics['cap']
