@@ -94,11 +94,13 @@ def extract_metrics(text):
     top10_match = re.search(r'Top 10:\s*([0-9.]+)%', clean_text)
     metrics['top10'] = top10_match.group(1) if top10_match else 'N/A'
     
-    dist_match = re.search(r'Top 10:\s*[0-9.]+%\s*\n?\s*└([0-9.\|]+)', clean_text)
-    if not dist_match:
-        # Try alternative format without newline
-        dist_match = re.search(r'└([0-9.\|]+)', clean_text)
-    metrics['distribution'] = dist_match.group(1).strip() if dist_match else 'N/A'
+    # Distribution format: └3.3|3.3|3.1|2.8|...
+    dist_match = re.search(r'└([0-9.|\s]+?)(?:\n|$|Top)', clean_text)
+    if dist_match:
+        dist_str = dist_match.group(1).strip().replace(' ', '')
+        metrics['distribution'] = dist_str
+    else:
+        metrics['distribution'] = 'N/A'
     
     buy_pct_match = re.search(r'Sum 🅑:([0-9.]+)%', clean_text)
     metrics['buy_pct'] = buy_pct_match.group(1) if buy_pct_match else 'N/A'
