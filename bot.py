@@ -95,11 +95,8 @@ def extract_metrics(text):
     top10_match = re.search(r'Top 10:\s*([0-9.]+)%', clean_text)
     metrics['top10'] = top10_match.group(1) if top10_match else 'N/A'
     
-    # DISTRIBUTION - search in full text, not cleaned
-    dist_match = re.search(r'([0-9]+\.[0-9]+(?:\|[0-9]+\.[0-9]+){9,})', text)
-    if not dist_match:
-        dist_match = re.search(r'([0-9]+(?:\|[0-9]+){9,})', text)
-    metrics['distribution'] = dist_match.group(1) if dist_match else 'N/A'
+    # DISTRIBUTION - removed due to parsing issues with markdown
+    metrics['distribution'] = 'N/A'
     
     buy_pct_match = re.search(r'Sum 🅑:([0-9.]+)%', clean_text)
     metrics['buy_pct'] = buy_pct_match.group(1) if buy_pct_match else 'N/A'
@@ -113,11 +110,17 @@ def extract_metrics(text):
     else:
         metrics['snipers'] = 'N/A'
     
-    bundle_match = re.search(r'Bundle:\s*(\d+)(?:\s+buy\s+([0-9.]+)%)?', clean_text)
-    if bundle_match and bundle_match.group(1) != '0':
-        metrics['bundles'] = f"{bundle_match.group(1)} buy {bundle_match.group(2) or '0'}%"
+    # BUNDLES with SOL amount
+    bundle_match = re.search(r'Bundle:\s*(\d+)\s+buy\s+([0-9.]+)%\s+with\s+([0-9.]+)\s+SOL', clean_text)
+    if bundle_match:
+        metrics['bundles'] = f"{bundle_match.group(1)} buy {bundle_match.group(2)}% with {bundle_match.group(3)} SOL"
     else:
-        metrics['bundles'] = '0'
+        # Fallback for bundles without SOL
+        bundle_match2 = re.search(r'Bundle:\s*(\d+)(?:\s+buy\s+([0-9.]+)%)?', clean_text)
+        if bundle_match2 and bundle_match2.group(1) != '0':
+            metrics['bundles'] = f"{bundle_match2.group(1)} buy {bundle_match2.group(2) or '0'}%"
+        else:
+            metrics['bundles'] = '0'
     
     kols_match = re.search(r'KOLs:\s*(\d+)', clean_text)
     metrics['kols'] = kols_match.group(1) if kols_match else 'N/A'
@@ -329,4 +332,3 @@ async def main():
 
 if __name__ == '__main__':
     asyncio.run(main())
-
